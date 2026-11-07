@@ -1,0 +1,19 @@
+# Build and bundle outputs
+.build/
+GoCoach.app/
+
+# Python virtual environment and caches
+.venv/
+__pycache__/
+*.pyc
+
+# Runtime IPC and logs
+.coach_ipc/
+analysis_logs/
+
+# Large model weights (downloaded on setup)
+Resources/models/*.bin.gz
+Resources/AppIcon.iconset/
+
+# macOS system files
+.DS_Store
