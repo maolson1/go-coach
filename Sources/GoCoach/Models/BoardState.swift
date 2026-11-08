@@ -147,6 +147,8 @@ public struct BoardState: Codable, Sendable, Equatable {
     public let handicap: Int
     public private(set) var grid: [StoneColor?]
     public private(set) var nextToPlay: StoneColor
+    public private(set) var initialPlayer: StoneColor = .black
+    public private(set) var initialMoveNumber: Int = 0
     public private(set) var capturesByBlack: Int = 0
     public private(set) var capturesByWhite: Int = 0
     public private(set) var moveHistory: [RecordedMove] = []
@@ -154,12 +156,17 @@ public struct BoardState: Codable, Sendable, Equatable {
     private var positionHashes: Set<Int> = []
     public private(set) var koPoint: BoardPoint? = nil
 
+    public var currentMoveNumber: Int {
+        initialMoveNumber + moveHistory.count
+    }
+
     public init(size: Int = 19, komi: Double = 6.5, handicap: Int = 0) {
         self.size = size
         self.komi = handicap >= 2 ? 0.5 : komi
         self.handicap = handicap
         self.grid = Array(repeating: nil, count: size * size)
         self.nextToPlay = .black
+        self.initialPlayer = .black
 
         if handicap >= 2 {
             let hPoints = Self.handicapPoints(for: size, count: handicap)
@@ -168,6 +175,28 @@ public struct BoardState: Codable, Sendable, Equatable {
                 self.initialStones.append((.black, pt))
             }
             self.nextToPlay = .white
+            self.initialPlayer = .white
+        }
+        self.positionHashes.insert(computeGridHash(grid))
+    }
+
+    public init(
+        size: Int = 19,
+        komi: Double = 6.5,
+        initialStones: [(StoneColor, BoardPoint)],
+        initialPlayer: StoneColor = .black,
+        initialMoveNumber: Int = 0
+    ) {
+        self.size = size
+        self.komi = komi
+        self.handicap = 0
+        self.grid = Array(repeating: nil, count: size * size)
+        self.nextToPlay = initialPlayer
+        self.initialPlayer = initialPlayer
+        self.initialMoveNumber = initialMoveNumber
+        for (color, pt) in initialStones where pt.col >= 0 && pt.col < size && pt.row >= 0 && pt.row < size {
+            self.grid[pt.row * size + pt.col] = color
+            self.initialStones.append((color, pt))
         }
         self.positionHashes.insert(computeGridHash(grid))
     }
@@ -176,11 +205,12 @@ public struct BoardState: Codable, Sendable, Equatable {
         lhs.size == rhs.size &&
         lhs.grid == rhs.grid &&
         lhs.nextToPlay == rhs.nextToPlay &&
+        lhs.initialMoveNumber == rhs.initialMoveNumber &&
         lhs.moveHistory.count == rhs.moveHistory.count
     }
 
     private enum CodingKeys: String, CodingKey {
-        case size, komi, handicap, grid, nextToPlay, capturesByBlack, capturesByWhite, moveHistory, koPoint
+        case size, komi, handicap, grid, nextToPlay, initialPlayer, initialMoveNumber, capturesByBlack, capturesByWhite, moveHistory, koPoint
     }
 
     public func stone(at point: BoardPoint) -> StoneColor? {
@@ -282,7 +312,7 @@ public struct BoardState: Codable, Sendable, Equatable {
     @discardableResult
     public mutating func play(_ action: MoveAction, color: StoneColor? = nil) throws -> RecordedMove {
         let mover = color ?? nextToPlay
-        let moveNum = moveHistory.count + 1
+        let moveNum = initialMoveNumber + moveHistory.count + 1
 
         switch action {
         case .pass:
@@ -363,7 +393,7 @@ public struct BoardState: Codable, Sendable, Equatable {
 
     /// Game phase estimation for tactical digest
     public var gamePhase: String {
-        let m = moveHistory.count
+        let m = currentMoveNumber
         let scale = Double(size * size) / 361.0
         if Double(m) < 45.0 * scale {
             return "opening"
@@ -829,8 +859,8 @@ public struct BoardState: Codable, Sendable, Equatable {
         }
     }
 
-    /// Simulates the 5-move Principal Variations (`bestPV` and `punishPV`) on copies of `baseBoard`
-    /// to extract verified end-of-sequence captures and liberty counts so the LLM never guesses PV outcomes.
+    /// Simulates the Principal Variations (`bestPV` and `punishPV`) on copies of `baseBoard`
+    /// to extract verified end-of-sequence captures, forcing ataris, cross-board switches, and liberty counts.
     public static func summarizePVOutcomes(
         baseBoard: BoardState,
         mover: StoneColor,
@@ -845,25 +875,120 @@ public struct BoardState: Codable, Sendable, Equatable {
             var turn = mover
             var moverCaptured: [String] = []
             var oppCaptured: [String] = []
-            for gtp in bestPV.prefix(5) {
+            var forcingAtaris: [String] = []
+            var crossBoardSwitch: String? = nil
+            let startPt = BoardPoint.fromGTP(bestPV[0], boardSize: size)
+
+            for gtp in bestPV.prefix(8) {
                 let act = MoveAction.fromGTP(gtp, boardSize: size)
+                if let pt = BoardPoint.fromGTP(gtp, boardSize: size) {
+                    if turn == mover, let sPt = startPt, sPt.manhattanDistance(to: pt) > 6, crossBoardSwitch == nil {
+                        let startQuad = baseBoard.sectorName(col: sPt.col, row: sPt.row)
+                        let targetQuad = baseBoard.sectorName(col: pt.col, row: pt.row)
+                        let onSameDiagonal = abs((pt.col - pt.row) - (sPt.col - sPt.row)) <= 3 || abs((pt.col + pt.row) - (sPt.col + sPt.row)) <= 3
+                        let isWedge = sim.isWedgeOrCrossCut(at: pt, mover: mover)
+
+                        // Collect adjacent opponent groups at the distant target point
+                        var adjOppDescs: [String] = []
+                        var seenReps: Set<BoardPoint> = []
+                        for nb in pt.neighbors(boardSize: size) where sim.stone(at: nb) == mover.opponent {
+                            let (grp, libs) = sim.groupAndLiberties(at: nb)
+                            if let rep = grp.sorted(by: { ($0.row, $0.col) < ($1.row, $1.col) }).first, !seenReps.contains(rep) {
+                                seenReps.insert(rep)
+                                let sample = grp.sorted(by: { ($0.row, $0.col) < ($1.row, $1.col) }).prefix(3).map { $0.toGTP(boardSize: size) }.joined(separator: ",")
+                                adjOppDescs.append("\(grp.count)-stone [\(sample)] (\(libs.count) libs)")
+                            }
+                        }
+
+                        var detail = "plays forcing sequence in \(startQuad) then switches in sente to \(gtp) in \(targetQuad)"
+                        if forcingAtaris.count >= 2 && onSameDiagonal {
+                            detail = "chases opponent in a diagonal ladder/atari sequence in \(startQuad) (\(forcingAtaris.joined(separator: ", "))) aimed at the \(targetQuad) ladder-breaker, then plays \(gtp) in sente"
+                        }
+                        if isWedge && !adjOppDescs.isEmpty {
+                            detail += " — wedging/cutting between opponent's \(adjOppDescs.joined(separator: " and ")) to create a double threat"
+                        } else if !adjOppDescs.isEmpty {
+                            detail += " — directly attacking opponent's \(adjOppDescs.joined(separator: " and "))"
+                        }
+                        crossBoardSwitch = detail
+                    }
+                }
                 if let rec = try? sim.play(act, color: turn) {
                     let capGTPs = rec.capturedPoints.map { $0.toGTP(boardSize: size) }
-                    if turn == mover { moverCaptured.append(contentsOf: capGTPs) }
-                    else { oppCaptured.append(contentsOf: capGTPs) }
+                    if turn == mover {
+                        moverCaptured.append(contentsOf: capGTPs)
+                        if case .place(let pt) = act {
+                            for nb in pt.neighbors(boardSize: size) where sim.stone(at: nb) == mover.opponent {
+                                let (_, libs) = sim.groupAndLiberties(at: nb)
+                                if libs.count == 1 && !forcingAtaris.contains(gtp) {
+                                    forcingAtaris.append(gtp)
+                                }
+                            }
+                        }
+                    } else {
+                        oppCaptured.append(contentsOf: capGTPs)
+                    }
                 }
                 turn = turn.opponent
             }
             var parts: [String] = []
+            if !forcingAtaris.isEmpty {
+                parts.append("gives forcing atari at \(forcingAtaris.joined(separator: ", "))")
+            }
+            if let switchDesc = crossBoardSwitch {
+                parts.append(switchDesc)
+            } else if forcingAtaris.count >= 3,
+                      let firstAtariPt = BoardPoint.fromGTP(forcingAtaris[0], boardSize: size),
+                      let lastAtariPt = BoardPoint.fromGTP(forcingAtaris.last!, boardSize: size) {
+                let allPts = forcingAtaris.compactMap { BoardPoint.fromGTP($0, boardSize: size) }
+                let totalDRow = allPts.reduce(0) { $0 + ($1.row - firstAtariPt.row) }
+                let totalDCol = allPts.reduce(0) { $0 + ($1.col - firstAtariPt.col) }
+                if abs(totalDRow) >= 1 && abs(totalDCol) >= 1 {
+                    let stepR = totalDRow > 0 ? 1 : -1
+                    let stepC = totalDCol > 0 ? 1 : -1
+                    var hitOppPt: BoardPoint? = nil
+                    outerLoop: for k in 1..<size {
+                        for (dr, dc) in [(0, 0), (0, stepC), (stepR, 0), (-stepR, stepC), (stepR, -stepC)] {
+                            let r = lastAtariPt.row + k * stepR + dr
+                            let c = lastAtariPt.col + k * stepC + dc
+                            let p = BoardPoint(col: c, row: r)
+                            if baseBoard.isValid(p), baseBoard.stone(at: p) == mover.opponent, p.manhattanDistance(to: lastAtariPt) > 3 {
+                                hitOppPt = p
+                                break outerLoop
+                            }
+                        }
+                    }
+                    if let breakerPt = hitOppPt {
+                        let breakerGTP = breakerPt.toGTP(boardSize: size)
+                        let destQuad = baseBoard.sectorName(col: breakerPt.col, row: breakerPt.row)
+                        // Also find any other opponent group within 2 intersections of `breakerPt`
+                        var nearbyGroups: [String] = []
+                        var seenReps: Set<BoardPoint> = []
+                        for r in max(0, breakerPt.row - 2)...min(size - 1, breakerPt.row + 2) {
+                            for c in max(0, breakerPt.col - 2)...min(size - 1, breakerPt.col + 2) {
+                                let np = BoardPoint(col: c, row: r)
+                                if baseBoard.stone(at: np) == mover.opponent {
+                                    let (grp, libs) = baseBoard.groupAndLiberties(at: np)
+                                    if let rep = grp.sorted(by: { ($0.row, $0.col) < ($1.row, $1.col) }).first, !seenReps.contains(rep) {
+                                        seenReps.insert(rep)
+                                        let sample = grp.sorted(by: { ($0.row, $0.col) < ($1.row, $1.col) }).prefix(3).map { $0.toGTP(boardSize: size) }.joined(separator: ",")
+                                        nearbyGroups.append("\(grp.count)-stone [\(sample)] (\(libs.count) libs)")
+                                    }
+                                }
+                            }
+                        }
+                        parts.append("drives a diagonal broken-ladder chase (\(forcingAtaris.joined(separator: ", "))) aimed directly at opponent's ladder-breaker \(breakerGTP) and \(nearbyGroups.joined(separator: " / ")) in \(destQuad) to set up a double attack")
+                    }
+                }
+            }
             if !moverCaptured.isEmpty {
                 parts.append("captures \(moverCaptured.count) stone(s) [\(moverCaptured.prefix(3).joined(separator: ","))]")
             }
             if !oppCaptured.isEmpty {
                 parts.append("sacrifices \(oppCaptured.count) stone(s) [\(oppCaptured.prefix(3).joined(separator: ","))]")
             }
-            if let firstPt = BoardPoint.fromGTP(bestPV[0], boardSize: size), sim.stone(at: firstPt) == mover {
+            if let firstPt = startPt, sim.stone(at: firstPt) == mover {
                 let (grp, libs) = sim.groupAndLiberties(at: firstPt)
-                parts.append("\(bestPV[0]) group ends 5-move PV with \( grp.count ) stone(s) and \(libs.count) liberties")
+                parts.append("\(bestPV[0]) group ends PV with \(grp.count) stone(s) and \(libs.count) liberties")
             }
             if !parts.isEmpty {
                 summaries.append("Best PV outcome: " + parts.joined(separator: "; "))
@@ -875,7 +1000,7 @@ public struct BoardState: Codable, Sendable, Equatable {
             var turn = mover
             var moverCaptured: [String] = []
             var oppCaptured: [String] = []
-            for gtp in punishPV.prefix(5) {
+            for gtp in punishPV.prefix(6) {
                 let act = MoveAction.fromGTP(gtp, boardSize: size)
                 if let rec = try? sim.play(act, color: turn) {
                     let capGTPs = rec.capturedPoints.map { $0.toGTP(boardSize: size) }
@@ -890,7 +1015,7 @@ public struct BoardState: Codable, Sendable, Equatable {
             }
             if let firstPt = BoardPoint.fromGTP(punishPV[0], boardSize: size), sim.stone(at: firstPt) == mover {
                 let (_, libs) = sim.groupAndLiberties(at: firstPt)
-                parts.append("your \(punishPV[0]) group ends 5-move PV with \(libs.count) liberties")
+                parts.append("your \(punishPV[0]) group ends PV with \(libs.count) liberties")
             }
             if !parts.isEmpty {
                 summaries.append("Punishment PV outcome: " + parts.joined(separator: "; "))
@@ -933,12 +1058,14 @@ public struct BoardState: Codable, Sendable, Equatable {
         tacticalTags: [String],
         ownershipShifts: [String] = [],
         pvOutcomes: [String] = [],
+        humanReplyRefutationLine: String? = nil,
+        effectiveBestPV: [String]? = nil,
         counterfactualNotes: [String] = []
     ) -> String {
         let recentSlice = moveHistory.suffix(6)
         let recentStr = recentSlice.map { "\($0.moveNumber):\($0.color.rawValue) \($0.action.toGTP(boardSize: size))" }.joined(separator: ", ")
 
-        // Local stones around the action point (7x7 window) to keep token count minimal
+        // Local stones around the action point (9x9 window) to keep token count minimal
         let focusPt: BoardPoint? = {
             if let pm = playedMove, case .place(let pt) = pm.action { return pt }
             if let bm = bestMoveInfo, let pt = BoardPoint.fromGTP(bm.move, boardSize: size) { return pt }
@@ -959,28 +1086,61 @@ public struct BoardState: Codable, Sendable, Equatable {
             }
         }
 
+        // Include stones around both `bestMoveInfo` (if different from `focusPt`) and any distant PV target (`manhattanDistance > 6`)
+        let pvToInspect = effectiveBestPV ?? bestMoveInfo?.pv ?? []
+        var extraRegionLines: [String] = []
+        var coveredCenters: [BoardPoint] = focusPt.map { [$0] } ?? []
+
+        for gtp in pvToInspect.prefix(8) {
+            if let pt = BoardPoint.fromGTP(gtp, boardSize: size),
+               coveredCenters.allSatisfy({ $0.manhattanDistance(to: pt) > 6 }) {
+                coveredCenters.append(pt)
+                var distB: [String] = []
+                var distW: [String] = []
+                for r in max(0, pt.row - 3)...min(size - 1, pt.row + 3) {
+                    for c in max(0, pt.col - 3)...min(size - 1, pt.col + 3) {
+                        let p = BoardPoint(col: c, row: r)
+                        if let s = stone(at: p) {
+                            if s == .black { distB.append(p.toGTP(boardSize: size)) }
+                            else { distW.append(p.toGTP(boardSize: size)) }
+                        }
+                    }
+                }
+                if !distB.isEmpty || !distW.isEmpty {
+                    let quad = sectorName(col: pt.col, row: pt.row)
+                    extraRegionLines.append("Stones near PV coordinate \(gtp) (\(quad)): B[\(distB.prefix(12).joined(separator: ","))] W[\(distW.prefix(12).joined(separator: ","))]")
+                }
+            }
+        }
+
         var lines: [String] = []
-        lines.append("Board: \(size)x\(size) | Move #\(moveHistory.count) (\(gamePhase)) | Student Rank: \(playerRank)")
+        lines.append("Board: \(size)x\(size) | Move #\(currentMoveNumber) (\(gamePhase)) | Student Rank: \(playerRank)")
         if !recentStr.isEmpty {
             lines.append("Recent moves: \(recentStr)")
         }
         if !localBlack.isEmpty || !localWhite.isEmpty {
             lines.append("Local stones near focus: B[\(localBlack.prefix(14).joined(separator: ","))] W[\(localWhite.prefix(14).joined(separator: ","))]")
         }
+        lines.append(contentsOf: extraRegionLines)
         if let pm = playedMove {
             let gtp = pm.action.toGTP(boardSize: size)
             lines.append(String(format: "Student (%@) played: %@ (Lost %.1f pts, -%.0f%% winrate; Score now: %+.1f B)", pm.color.displayName, gtp, scoreLoss, winrateDropPercent, scoreLeadAfter))
         }
         if !punishmentPV.isEmpty {
-            lines.append("Opponent punishment PV: \(punishmentPV.prefix(5).joined(separator: " -> "))")
+            lines.append("Opponent punishment PV: \(punishmentPV.prefix(6).joined(separator: " -> "))")
         }
         if let best = bestMoveInfo {
-            let pv = best.pv.prefix(5).joined(separator: " -> ")
-            lines.append(String(format: "KataGo Best Move: %@ (PV: %@)", best.move, pv))
+            let pv = (effectiveBestPV ?? best.pv).prefix(8).joined(separator: " -> ")
+            let hpStr = (best.humanPrior ?? -1) >= 0 ? String(format: ", Human SL prior: %.0f%%", (best.humanPrior ?? 0) * 100.0) : ""
+            lines.append(String(format: "KataGo Best Move: %@ (Score: %+.1f B, Winrate: %.0f%%%@, PV: %@)", best.move, best.scoreLead, best.winrate * 100.0, hpStr, pv))
+        }
+        if let refLine = humanReplyRefutationLine {
+            lines.append(refLine)
         }
         if let second = secondMoveInfo {
-            let pv = second.pv.prefix(4).joined(separator: " -> ")
-            lines.append(String(format: "2nd Alternative: %@ (PV: %@)", second.move, pv))
+            let pv = second.pv.prefix(5).joined(separator: " -> ")
+            let hpStr = (second.humanPrior ?? -1) >= 0 ? String(format: ", Human SL prior: %.0f%%", (second.humanPrior ?? 0) * 100.0) : ""
+            lines.append(String(format: "2nd Alternative: %@ (Score: %+.1f B, Winrate: %.0f%%%@, PV: %@)", second.move, second.scoreLead, second.winrate * 100.0, hpStr, pv))
         }
         if !tacticalTags.isEmpty {
             lines.append("Detected tactical patterns: \(tacticalTags.joined(separator: ", "))")
@@ -989,13 +1149,112 @@ public struct BoardState: Codable, Sendable, Equatable {
             lines.append("Group life/death & ownership shift: \(ownershipShifts.joined(separator: "; "))")
         }
         if !pvOutcomes.isEmpty {
-            lines.append("Verified 5-move PV outcomes: \(pvOutcomes.joined(separator: " | "))")
+            lines.append("Verified PV outcomes: \(pvOutcomes.joined(separator: " | "))")
         }
         if !counterfactualNotes.isEmpty {
             lines.append("[KataGo Counterfactual Verification for Student's Question]\n" + counterfactualNotes.joined(separator: "\n"))
         }
         lines.append("Explain in 2-3 concise, encouraging sentences why the student's move lost value and the human Go concept behind KataGo's preferred move.")
         return lines.joined(separator: "\n")
+    }
+
+    /// Parses an SGF string (supporting both `AB[..]`/`AW[..]` setup stones and `;B[..]`/`;W[..]` move sequences)
+    /// up to `maxMove` without preserving any external metadata (player names, event titles, or comments).
+    public static func fromSGF(_ sgf: String, upToMove maxMove: Int? = nil, initialMoveOffset: Int = 0) -> BoardState? {
+        func sgfCoordToPoint(_ code: String, size: Int) -> BoardPoint? {
+            let trimmed = code.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            guard trimmed.count == 2 else { return nil }
+            let chars = Array(trimmed)
+            let col = Int(chars[0].asciiValue ?? 0) - Int(Character("a").asciiValue!)
+            let row = Int(chars[1].asciiValue ?? 0) - Int(Character("a").asciiValue!)
+            guard col >= 0 && col < size && row >= 0 && row < size else { return nil }
+            return BoardPoint(col: col, row: row)
+        }
+
+        var boardSize = 19
+        if let szRange = sgf.range(of: #"SZ\[(\d+)\]"#, options: .regularExpression) {
+            let matchStr = String(sgf[szRange])
+            let digits = matchStr.filter(\.isNumber)
+            if let parsed = Int(digits), [9, 13, 19].contains(parsed) {
+                boardSize = parsed
+            }
+        }
+
+        var komi = 6.5
+        if let kmRange = sgf.range(of: #"KM\[([0-9.\-]+)\]"#, options: .regularExpression) {
+            let matchStr = String(sgf[kmRange])
+            if let open = matchStr.firstIndex(of: "["), let close = matchStr.firstIndex(of: "]") {
+                let valStr = String(matchStr[matchStr.index(after: open)..<close])
+                if let parsed = Double(valStr) {
+                    komi = parsed
+                }
+            }
+        }
+
+        var nextPlayer: StoneColor = .black
+        if sgf.range(of: #"PL\[W\]"#, options: .regularExpression) != nil {
+            nextPlayer = .white
+        }
+
+        func extractSetupCoords(tag: String) -> [BoardPoint] {
+            var pts: [BoardPoint] = []
+            let pattern = tag + #"(\[[a-s]{2}\]\s*)+"#
+            guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }
+            let nsRange = NSRange(sgf.startIndex..<sgf.endIndex, in: sgf)
+            for match in regex.matches(in: sgf, range: nsRange) {
+                guard let r = Range(match.range, in: sgf) else { continue }
+                let block = String(sgf[r])
+                if let coordRegex = try? NSRegularExpression(pattern: #"\[([a-s]{2})\]"#) {
+                    let bRange = NSRange(block.startIndex..<block.endIndex, in: block)
+                    for cm in coordRegex.matches(in: block, range: bRange) {
+                        if let cr = Range(cm.range(at: 1), in: block),
+                           let pt = sgfCoordToPoint(String(block[cr]), size: boardSize) {
+                            pts.append(pt)
+                        }
+                    }
+                }
+            }
+            return pts
+        }
+
+        let abPts = extractSetupCoords(tag: "AB")
+        let awPts = extractSetupCoords(tag: "AW")
+        var setupStones: [(StoneColor, BoardPoint)] = []
+        for pt in abPts { setupStones.append((.black, pt)) }
+        for pt in awPts { setupStones.append((.white, pt)) }
+
+        var board = BoardState(
+            size: boardSize,
+            komi: komi,
+            initialStones: setupStones,
+            initialPlayer: nextPlayer,
+            initialMoveNumber: initialMoveOffset
+        )
+
+        if let moveRegex = try? NSRegularExpression(pattern: #";\s*([BW])\[([a-s]{0,2})\]"#) {
+            let nsRange = NSRange(sgf.startIndex..<sgf.endIndex, in: sgf)
+            var count = 0
+            for match in moveRegex.matches(in: sgf, range: nsRange) {
+                if let limit = maxMove, count >= limit {
+                    break
+                }
+                guard let cRange = Range(match.range(at: 1), in: sgf),
+                      let pRange = Range(match.range(at: 2), in: sgf) else { continue }
+                let color: StoneColor = (sgf[cRange] == "B") ? .black : .white
+                let coordStr = String(sgf[pRange])
+                let action: MoveAction
+                if let pt = sgfCoordToPoint(coordStr, size: boardSize) {
+                    action = .place(pt)
+                } else {
+                    action = .pass
+                }
+                if (try? board.play(action, color: color)) != nil {
+                    count += 1
+                }
+            }
+        }
+
+        return board
     }
 
     /// Exports the game to standard SGF (Smart Game Format)

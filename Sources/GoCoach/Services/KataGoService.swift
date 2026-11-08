@@ -26,11 +26,32 @@ public struct KataGoAnalysisResponse: Codable, Sendable, Equatable {
     public let id: String
     public let isDuringSearch: Bool?
     public let turnNumber: Int?
-    public let moveInfos: [KataGoMoveInfo]
+    public var moveInfos: [KataGoMoveInfo]
     public let rootInfo: KataGoRootInfo
     public let ownership: [Double]?
     public let policy: [Double]?
     public let humanPolicy: [Double]?
+
+    /// Returns the top human-likely move (GTP coordinate and probability) from `humanPolicy`
+    public func topHumanPolicyMove(board: BoardState) -> (move: String, probability: Double)? {
+        let size = board.size
+        guard let hp = humanPolicy, hp.count >= size * size else { return nil }
+        var bestPt: BoardPoint? = nil
+        var bestProb: Double = -1.0
+        for r in 0..<size {
+            for c in 0..<size {
+                let p = hp[r * size + c]
+                guard p > bestProb else { continue }
+                let pt = BoardPoint(col: c, row: r)
+                if case .success = board.canPlay(at: pt) {
+                    bestProb = p
+                    bestPt = pt
+                }
+            }
+        }
+        guard let pt = bestPt, bestProb > 0 else { return nil }
+        return (pt.toGTP(boardSize: size), bestProb)
+    }
 
     /// Returns probability of playing `gtpMove` according to the Human SL model
     public func humanProbability(forGTP gtpMove: String, boardSize: Int) -> Double? {
@@ -85,7 +106,7 @@ public actor KataGoService {
             "-config", configPath,
             "-model", mainModelPath,
             "-override-config",
-            "logDir=\(logDir),logToStderr=false,numAnalysisThreads=2,numSearchThreadsPerAnalysisThread=8,reportAnalysisWinratesAs=BLACK,maxVisits=50"
+            "logDir=\(logDir),logToStderr=false,numAnalysisThreads=2,numSearchThreadsPerAnalysisThread=8,reportAnalysisWinratesAs=BLACK,maxVisits=200"
         ]
 
         if let humanPath = humanModelPath, FileManager.default.fileExists(atPath: humanPath) {
@@ -153,11 +174,23 @@ public actor KataGoService {
 
     private func handleOutputLine(_ data: Data) {
         let decoder = JSONDecoder()
-        guard let resp = try? decoder.decode(KataGoAnalysisResponse.self, from: data) else {
+        guard var resp = try? decoder.decode(KataGoAnalysisResponse.self, from: data) else {
             return
         }
         if resp.isDuringSearch == true {
             return
+        }
+        if resp.moveInfos.count > 1 {
+            let maxV = resp.moveInfos.map(\.visits).max() ?? 1
+            let minWellVisited = max(5, maxV / 4)
+            let sign: Double = (resp.rootInfo.currentPlayer.uppercased() == "W") ? -1.0 : 1.0
+            let wellVisited = resp.moveInfos.filter { $0.visits >= minWellVisited }.sorted { a, b in
+                let utilA = (a.winrate * sign) * 25.0 + (a.scoreLead * sign)
+                let utilB = (b.winrate * sign) * 25.0 + (b.scoreLead * sign)
+                return utilA > utilB
+            }
+            let others = resp.moveInfos.filter { $0.visits < minWellVisited }
+            resp.moveInfos = wellVisited + others
         }
         if let cont = pendingContinuations.removeValue(forKey: resp.id) {
             cont.resume(returning: resp)
@@ -167,7 +200,7 @@ public actor KataGoService {
     public func analyze(
         board: BoardState,
         humanSLProfile: String,
-        maxVisits: Int = 45,
+        maxVisits: Int = 55,
         includeOwnership: Bool = true
     ) async throws -> KataGoAnalysisResponse {
         try startIfNeeded()
@@ -196,6 +229,7 @@ public actor KataGoService {
         ]
         if !initialStonesPayload.isEmpty {
             query["initialStones"] = initialStonesPayload
+            query["initialPlayer"] = board.initialPlayer.rawValue
         }
         if hasHumanSLModel {
             query["overrideSettings"] = [

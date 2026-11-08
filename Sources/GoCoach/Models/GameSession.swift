@@ -393,10 +393,44 @@ public final class GameSession: ObservableObject {
         let oppPunishPV = intervention.postAnalysis.moveInfos.first?.pv ?? []
         let punishPV = [intervention.playedMoveGTP] + oppPunishPV
 
+        // Run a fast follow-up query after `bestMoveGTP` so the opponent's reply is at the root node.
+        // This reveals the opponent's #1 likely human reply (from `humanPolicy`) and how `bestMoveGTP`
+        // refutes it, even when superhuman KataGo's main PV tenukis to dodge the trap!
+        var effectiveBestPV: [String] = bestInfo?.pv ?? []
+        var humanReplyRefutationLine: String? = nil
+        let profile = ratingManager.currentRank.kataGoHumanSLProfile
+        if let bestPt = BoardPoint.fromGTP(intervention.bestMoveGTP, boardSize: board.size) {
+            var boardAfterBest = intervention.boardBeforeMove
+            if (try? boardAfterBest.play(.place(bestPt), color: humanColor)) != nil,
+               let afterBestEval = try? await katago.analyze(board: boardAfterBest, humanSLProfile: profile, maxVisits: 50) {
+                if let (topHumanMove, topHumanProb) = afterBestEval.topHumanPolicyMove(board: boardAfterBest),
+                   topHumanProb >= 0.12,
+                   let humanReplyInfo = afterBestEval.moveInfos.first(where: { $0.move.uppercased() == topHumanMove.uppercased() }) {
+                    let fullHumanReplyPV = [intervention.bestMoveGTP] + humanReplyInfo.pv
+                    let origSecondMove = bestInfo?.pv.dropFirst().first?.uppercased()
+                    if humanReplyInfo.pv.count >= 3 {
+                        effectiveBestPV = fullHumanReplyPV
+                    }
+                    var refDesc = String(
+                        format: "If opponent plays natural human reply %@ (%.0f%% human prior): continuation is %@ (Score: %+.1f B, Winrate: %.0f%%)",
+                        humanReplyInfo.move,
+                        topHumanProb * 100.0,
+                        fullHumanReplyPV.prefix(8).joined(separator: " -> "),
+                        humanReplyInfo.scoreLead,
+                        humanReplyInfo.winrate * 100.0
+                    )
+                    if let origReply = origSecondMove, origReply != topHumanMove.uppercased() {
+                        refDesc += " — superhuman AI sometimes tenukis at \(origReply) only because answering locally at \(humanReplyInfo.move) falls into this continuation"
+                    }
+                    humanReplyRefutationLine = refDesc
+                }
+            }
+        }
+
         let tags = board.analyzeTacticalTags(
             played: playedMove.action,
             bestMoveGTP: intervention.bestMoveGTP,
-            bestSecondGTP: bestInfo?.pv.dropFirst().first,
+            bestSecondGTP: effectiveBestPV.dropFirst().first,
             punishFirstGTP: oppPunishPV.first,
             mover: humanColor,
             boardBeforeMove: intervention.boardBeforeMove
@@ -414,7 +448,7 @@ public final class GameSession: ObservableObject {
         let pvOutcomes = BoardState.summarizePVOutcomes(
             baseBoard: intervention.boardBeforeMove,
             mover: humanColor,
-            bestPV: bestInfo?.pv ?? [],
+            bestPV: effectiveBestPV,
             punishPV: punishPV
         )
 
@@ -429,7 +463,9 @@ public final class GameSession: ObservableObject {
             scoreLeadAfter: intervention.postAnalysis.rootInfo.scoreLead,
             tacticalTags: tags,
             ownershipShifts: ownershipShifts,
-            pvOutcomes: pvOutcomes
+            pvOutcomes: pvOutcomes,
+            humanReplyRefutationLine: humanReplyRefutationLine,
+            effectiveBestPV: effectiveBestPV
         )
 
         let playedHumanProb = intervention.preAnalysis.humanProbability(
@@ -452,7 +488,7 @@ public final class GameSession: ObservableObject {
             tacticalTags: tags,
             ownershipShifts: ownershipShifts,
             pvOutcomes: pvOutcomes,
-            bestPV: bestInfo?.pv ?? [],
+            bestPV: effectiveBestPV,
             punishPV: punishPV,
             playedHumanProb: playedHumanProb,
             bestHumanProb: bestHumanProb,
