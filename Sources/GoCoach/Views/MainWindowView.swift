@@ -16,7 +16,7 @@ public struct MainWindowView: View {
                 Divider()
 
                 ZStack {
-                    Color(NSColor.underPageBackgroundColor)
+                    boardBackgroundView
                     GobanView(session: session)
                 }
 
@@ -49,6 +49,38 @@ public struct MainWindowView: View {
         }
         .sheet(isPresented: $showingNewGameSheet) {
             NewGameSheet(session: session)
+        }
+    }
+
+    private static let backgroundNSImage: NSImage? = {
+        let bundleParent = Bundle.main.bundleURL.deletingLastPathComponent().path
+        let candidates = [
+            Bundle.main.path(forResource: "cherry-tree", ofType: "jpg"),
+            "\(bundleParent)/cherry-tree.jpg",
+            "\(bundleParent)/Resources/cherry-tree.jpg",
+            "\(FileManager.default.currentDirectoryPath)/cherry-tree.jpg",
+            "\(FileManager.default.currentDirectoryPath)/Resources/cherry-tree.jpg"
+        ].compactMap { $0 }
+        for path in candidates {
+            if let img = NSImage(contentsOfFile: path) {
+                return img
+            }
+        }
+        return nil
+    }()
+
+    @ViewBuilder
+    private var boardBackgroundView: some View {
+        if let nsImg = Self.backgroundNSImage {
+            GeometryReader { geo in
+                Image(nsImage: nsImg)
+                    .resizable()
+                    .scaledToFill()
+                    .frame(width: geo.size.width, height: geo.size.height)
+                    .clipped()
+            }
+        } else {
+            Color(NSColor.underPageBackgroundColor)
         }
     }
 
