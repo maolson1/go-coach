@@ -1318,31 +1318,39 @@ public struct BoardState: Codable, Sendable, Equatable {
     }
 
     public static func handicapPoints(for size: Int, count: Int) -> [BoardPoint] {
-        let stars = starPoints(for: size)
-        guard stars.count >= 5 else { return [] }
-        if size == 19 {
-            // Top-right (15,3), Bottom-left (3,15), Bottom-right (15,15), Top-left (3,3), Center (9,9)
-            let tr = BoardPoint(col: 15, row: 3)
-            let bl = BoardPoint(col: 3, row: 15)
-            let br = BoardPoint(col: 15, row: 15)
-            let tl = BoardPoint(col: 3, row: 3)
-            let ml = BoardPoint(col: 3, row: 9)
-            let mr = BoardPoint(col: 15, row: 9)
-            let tm = BoardPoint(col: 9, row: 3)
-            let bm = BoardPoint(col: 9, row: 15)
-            let cc = BoardPoint(col: 9, row: 9)
-            switch count {
-            case 2: return [tr, bl]
-            case 3: return [tr, bl, br]
-            case 4: return [tr, bl, br, tl]
-            case 5: return [tr, bl, br, tl, cc]
-            case 6: return [tr, bl, br, tl, ml, mr]
-            case 7: return [tr, bl, br, tl, ml, mr, cc]
-            case 8: return [tr, bl, br, tl, ml, mr, tm, bm]
-            default: return [tr, bl, br, tl, ml, mr, tm, bm, cc]
-            }
-        } else {
-            return Array(stars.prefix(min(count, stars.count)))
+        let low: Int
+        let mid: Int
+        let high: Int
+        switch size {
+        case 9:
+            (low, mid, high) = (2, 4, 6)
+        case 13:
+            (low, mid, high) = (3, 6, 9)
+        case 19:
+            (low, mid, high) = (3, 9, 15)
+        default:
+            return []
+        }
+
+        let tr = BoardPoint(col: high, row: low)
+        let bl = BoardPoint(col: low, row: high)
+        let br = BoardPoint(col: high, row: high)
+        let tl = BoardPoint(col: low, row: low)
+        let ml = BoardPoint(col: low, row: mid)
+        let mr = BoardPoint(col: high, row: mid)
+        let tm = BoardPoint(col: mid, row: low)
+        let bm = BoardPoint(col: mid, row: high)
+        let cc = BoardPoint(col: mid, row: mid)
+
+        switch count {
+        case 2: return [tr, bl]
+        case 3: return [tr, bl, br]
+        case 4: return [tr, bl, br, tl]
+        case 5: return [tr, bl, br, tl, cc]
+        case 6: return [tr, bl, br, tl, ml, mr]
+        case 7: return [tr, bl, br, tl, ml, mr, cc]
+        case 8: return [tr, bl, br, tl, ml, mr, tm, bm]
+        default: return [tr, bl, br, tl, ml, mr, tm, bm, cc]
         }
     }
 }

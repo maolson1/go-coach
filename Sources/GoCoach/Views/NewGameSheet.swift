@@ -21,34 +21,29 @@ public struct NewGameSheet: View {
                 Image(systemName: "circle.grid.cross.fill")
                     .font(.title2)
                     .foregroundStyle(Color.accentColor)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("New Training Game")
-                        .font(.headline)
-                    Text("Configure board size, human-like opponent rank, and coach intervention sensitivity.")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                }
+                Text("New Game")
+                    .font(.headline)
             }
 
             Divider()
 
             Form {
                 Picker("Board Size:", selection: $selectedSize) {
-                    Text("9×9 (Quick Tactical)").tag(9)
-                    Text("13×13 (Balanced)").tag(13)
-                    Text("19×19 (Full Standard)").tag(19)
+                    Text("9×9").tag(9)
+                    Text("13×13").tag(13)
+                    Text("19×19").tag(19)
                 }
                 .pickerStyle(.segmented)
 
                 Picker("Your Color:", selection: $selectedColor) {
-                    Text("Black (Plays First)").tag(StoneColor.black)
-                    Text("White (6.5 Komi)").tag(StoneColor.white)
+                    Text("Black").tag(StoneColor.black)
+                    Text("White").tag(StoneColor.white)
                 }
                 .pickerStyle(.segmented)
 
                 Picker("Handicap Stones:", selection: $selectedHandicap) {
-                    Text("None (Even Game)").tag(0)
-                    ForEach(2...5, id: \.self) { h in
+                    Text("None").tag(0)
+                    ForEach(2...9, id: \.self) { h in
                         Text("\(h) Stones").tag(h)
                     }
                 }
