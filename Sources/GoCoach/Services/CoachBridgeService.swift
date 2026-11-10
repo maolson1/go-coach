@@ -73,12 +73,16 @@ public actor CoachBridgeService {
             return
         }
 
-        let pythonPath = Self.locatePython()
-        let scriptPath = Self.locateBridgeScript()
+        let workspaceRoot = Self.locateWorkspaceRoot()
+        let pythonPath = Self.locatePython(workspaceRoot: workspaceRoot)
+        let scriptPath = Self.locateBridgeScript(workspaceRoot: workspaceRoot)
 
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: pythonPath)
-        proc.currentDirectoryURL = URL(fileURLWithPath: "/Users/matt/go-coach")
+        proc.currentDirectoryURL = URL(fileURLWithPath: workspaceRoot)
+        var env = ProcessInfo.processInfo.environment
+        env["GOCOACH_WORKSPACE"] = workspaceRoot
+        proc.environment = env
         proc.arguments = [scriptPath]
 
         let inPipe = Pipe()
@@ -209,9 +213,22 @@ public actor CoachBridgeService {
         process = nil
     }
 
-    private static func locatePython() -> String {
+    private static func locateWorkspaceRoot() -> String {
+        if let envRoot = ProcessInfo.processInfo.environment["GOCOACH_WORKSPACE"],
+           FileManager.default.fileExists(atPath: envRoot) {
+            return envRoot
+        }
+        let bundleParent = Bundle.main.bundleURL.deletingLastPathComponent().path
+        if FileManager.default.fileExists(atPath: "\(bundleParent)/scripts/coach_bridge.py") ||
+           FileManager.default.fileExists(atPath: "\(bundleParent)/Package.swift") {
+            return bundleParent
+        }
+        return FileManager.default.currentDirectoryPath
+    }
+
+    private static func locatePython(workspaceRoot: String) -> String {
         let candidates = [
-            "/Users/matt/go-coach/.venv/bin/python",
+            "\(workspaceRoot)/.venv/bin/python",
             "\(FileManager.default.currentDirectoryPath)/.venv/bin/python",
             "/opt/homebrew/bin/python3",
             "/usr/bin/python3"
@@ -222,15 +239,15 @@ public actor CoachBridgeService {
         return "/usr/bin/python3"
     }
 
-    private static func locateBridgeScript() -> String {
+    private static func locateBridgeScript(workspaceRoot: String) -> String {
         let candidates = [
-            "/Users/matt/go-coach/scripts/coach_bridge.py",
+            "\(workspaceRoot)/scripts/coach_bridge.py",
             Bundle.main.resourcePath.map { "\($0)/scripts/coach_bridge.py" },
             "\(FileManager.default.currentDirectoryPath)/scripts/coach_bridge.py"
         ].compactMap { $0 }
         for path in candidates where FileManager.default.fileExists(atPath: path) {
             return path
         }
-        return "/Users/matt/go-coach/scripts/coach_bridge.py"
+        return "\(workspaceRoot)/scripts/coach_bridge.py"
     }
 }

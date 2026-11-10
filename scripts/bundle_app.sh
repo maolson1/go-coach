@@ -1,14 +1,35 @@
 #!/usr/bin/env zsh
 set -euo pipefail
 
-PROJECT_DIR="/Users/matt/go-coach"
+PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 APP_BUNDLE="${PROJECT_DIR}/GoCoach.app"
 CONTENTS_DIR="${APP_BUNDLE}/Contents"
 MACOS_DIR="${CONTENTS_DIR}/MacOS"
 RESOURCES_DIR="${CONTENTS_DIR}/Resources"
+HUMAN_MODEL_PATH="${PROJECT_DIR}/Resources/models/b18c384nbt-humanv0.bin.gz"
+HUMAN_MODEL_URL="https://github.com/lightvector/KataGo/releases/download/v1.15.0/b18c384nbt-humanv0.bin.gz"
 
-mkdir -p "${MACOS_DIR}" "${RESOURCES_DIR}/scripts" "${RESOURCES_DIR}/models"
+mkdir -p "${MACOS_DIR}" "${RESOURCES_DIR}/scripts" "${RESOURCES_DIR}/models" "${PROJECT_DIR}/Resources/models"
 
+# 1. Set up Python virtualenv with google-antigravity if not already present
+if [[ ! -x "${PROJECT_DIR}/.venv/bin/python" ]]; then
+    echo "Setting up Python virtual environment in .venv..."
+    python3 -m venv "${PROJECT_DIR}/.venv"
+    if [[ -f "${PROJECT_DIR}/requirements.txt" ]]; then
+        "${PROJECT_DIR}/.venv/bin/pip" install --upgrade pip
+        "${PROJECT_DIR}/.venv/bin/pip" install -r "${PROJECT_DIR}/requirements.txt" || \
+            echo "Warning: Could not install optional google-antigravity SDK package; live .coach_ipc session bridge and offline KataGo coach will still work."
+    fi
+fi
+
+# 2. Download KataGo Human SL model if not already present
+if [[ ! -f "${HUMAN_MODEL_PATH}" ]]; then
+    echo "Downloading KataGo Human SL model (b18c384nbt-humanv0.bin.gz)..."
+    curl -L --fail -o "${HUMAN_MODEL_PATH}" "${HUMAN_MODEL_URL}"
+fi
+
+# 3. Compile Swift sources into GoCoach.app binary
+echo "Compiling GoCoach..."
 if [[ -f "${PROJECT_DIR}/.build_bin" ]]; then
     cp "${PROJECT_DIR}/.build_bin" "${MACOS_DIR}/GoCoach"
 else
@@ -21,11 +42,12 @@ else
 fi
 chmod +x "${MACOS_DIR}/GoCoach"
 
+# 4. Bundle scripts, models, and icon
 cp "${PROJECT_DIR}/scripts/coach_bridge.py" "${RESOURCES_DIR}/scripts/coach_bridge.py"
 chmod +x "${RESOURCES_DIR}/scripts/coach_bridge.py"
 
-if [[ -f "${PROJECT_DIR}/Resources/models/b18c384nbt-humanv0.bin.gz" ]]; then
-    ln -sf "${PROJECT_DIR}/Resources/models/b18c384nbt-humanv0.bin.gz" "${RESOURCES_DIR}/models/b18c384nbt-humanv0.bin.gz"
+if [[ -f "${HUMAN_MODEL_PATH}" ]]; then
+    ln -sf "${HUMAN_MODEL_PATH}" "${RESOURCES_DIR}/models/b18c384nbt-humanv0.bin.gz"
 fi
 
 if [[ -f "${PROJECT_DIR}/Resources/AppIcon.icns" ]]; then

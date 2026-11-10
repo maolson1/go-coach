@@ -106,7 +106,8 @@ func renderIcon(size: Int) -> NSBitmapImageRep {
     return rep
 }
 
-let iconsetDir = "/Users/matt/go-coach/Resources/AppIcon.iconset"
+let projectDir = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().path
+let iconsetDir = "\(projectDir)/Resources/AppIcon.iconset"
 try? FileManager.default.removeItem(atPath: iconsetDir)
 try FileManager.default.createDirectory(atPath: iconsetDir, withIntermediateDirectories: true)
 

@@ -333,18 +333,32 @@ public actor KataGoService {
     }
 
     private static func locateMainModel() -> String {
-        let dir = "/opt/homebrew/opt/katago/share/katago"
-        let preferred = "\(dir)/kata1-b18c384nbt-s9996604416-d4316597426.bin.gz"
-        if FileManager.default.fileExists(atPath: preferred) {
-            return preferred
+        let dirs = [
+            "/opt/homebrew/opt/katago/share/katago",
+            "/usr/local/opt/katago/share/katago"
+        ]
+        for dir in dirs {
+            let preferred = "\(dir)/kata1-b18c384nbt-s9996604416-d4316597426.bin.gz"
+            if FileManager.default.fileExists(atPath: preferred) {
+                return preferred
+            }
+            let secondary = "\(dir)/g170e-b20c256x2-s5303129600-d1228401921.bin.gz"
+            if FileManager.default.fileExists(atPath: secondary) {
+                return secondary
+            }
+            if let files = try? FileManager.default.contentsOfDirectory(atPath: dir),
+               let anyModel = files.sorted().first(where: { $0.hasSuffix(".bin.gz") && !$0.contains("human") }) {
+                return "\(dir)/\(anyModel)"
+            }
         }
-        return "\(dir)/g170e-b20c256x2-s5303129600-d1228401921.bin.gz"
+        return "/opt/homebrew/opt/katago/share/katago/kata1-b18c384nbt-s9996604416-d4316597426.bin.gz"
     }
 
     private static func locateHumanModel() -> String? {
+        let bundleParent = Bundle.main.bundleURL.deletingLastPathComponent().path
         let candidates = [
-            "/Users/matt/go-coach/Resources/models/b18c384nbt-humanv0.bin.gz",
             Bundle.main.resourcePath.map { "\($0)/models/b18c384nbt-humanv0.bin.gz" },
+            "\(bundleParent)/Resources/models/b18c384nbt-humanv0.bin.gz",
             "\(FileManager.default.currentDirectoryPath)/Resources/models/b18c384nbt-humanv0.bin.gz"
         ].compactMap { $0 }
 

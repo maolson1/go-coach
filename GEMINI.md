@@ -1,15 +1,15 @@
 # GoCoach Workspace Rules (`GEMINI.md`)
 
-When the user asks you to coach them, start GoCoach, or attach to a game in this workspace (`/Users/matt/go-coach`):
+When the user asks you to coach them, start GoCoach, or attach to a game in this workspace:
 
-1. Ensure `GoCoach.app` is running (launch via `open /Users/matt/go-coach/GoCoach.app` if not already open).
+1. Ensure `GoCoach.app` is running (launch via `open GoCoach.app` if not already open).
 2. Start the reactive coaching listener in the background using `run_command` with `WaitMsBeforeAsync: 500`:
    ```sh
-   python3 /Users/matt/go-coach/scripts/agy_session_listener.py wait
+   python3 scripts/agy_session_listener.py wait
    ```
    Do **not** poll the task—end your turn and wait for Antigravity's reactive background-task wakeup when the player makes a blunder or clicks **Ask Coach** in `GoCoach.app`.
 3. When the listener task completes and outputs a JSON request (`id`, `digest`, `question`), respond to the app by running:
    ```sh
-   python3 /Users/matt/go-coach/scripts/agy_session_listener.py reply "<id>" "<your 2-3 sentence human-friendly Go coaching explanation>"
+   python3 scripts/agy_session_listener.py reply "<id>" "<your 2-3 sentence human-friendly Go coaching explanation>"
    ```
-   and immediately re-arm `python3 /Users/matt/go-coach/scripts/agy_session_listener.py wait` (`WaitMsBeforeAsync: 500`) for the next move.
+   and immediately re-arm `python3 scripts/agy_session_listener.py wait` (`WaitMsBeforeAsync: 500`) for the next move.

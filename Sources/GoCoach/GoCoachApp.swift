@@ -20,7 +20,7 @@ struct GoCoachApp: App {
                     if let iconPath = Bundle.main.path(forResource: "AppIcon", ofType: "icns"),
                        let img = NSImage(contentsOfFile: iconPath) {
                         NSApplication.shared.applicationIconImage = img
-                    } else if let img = NSImage(contentsOfFile: "/Users/matt/go-coach/Resources/AppIcon.icns") {
+                    } else if let img = NSImage(contentsOfFile: "\(FileManager.default.currentDirectoryPath)/Resources/AppIcon.icns") {
                         NSApplication.shared.applicationIconImage = img
                     }
                     NSApplication.shared.activate(ignoringOtherApps: true)

@@ -4,7 +4,7 @@ Antigravity Coaching Bridge for GoCoach macOS App.
 
 Supports a 3-tier coaching pipeline over JSON Lines (stdin/stdout):
 1. Live Antigravity Session Bridge (`.coach_ipc/`): Connects to ANY active
-   Antigravity conversation opened in `/Users/matt/go-coach` (via the workspace
+   Antigravity conversation opened in the workspace (via the workspace
    `GEMINI.md` / `go-coach` skill) — zero API keys required and not tied to any
    specific conversation ID.
 2. `google-antigravity` Python SDK (`Agent` with `LocalAgentConfig` / Vertex /
@@ -23,15 +23,22 @@ import time
 import traceback
 from typing import Any, Optional
 
-from google.antigravity import (
-    Agent,
-    CapabilitiesConfig,
-    CustomSystemInstructions,
-    LocalAgentConfig,
-    LocalOpenAIAgentConfig,
-)
+try:
+    from google.antigravity import (
+        Agent,
+        CapabilitiesConfig,
+        CustomSystemInstructions,
+        LocalAgentConfig,
+        LocalOpenAIAgentConfig,
+    )
+    HAS_AGY_SDK = True
+except ImportError:
+    Agent = Any  # type: ignore[misc,assignment]
+    HAS_AGY_SDK = False
 
-WORKSPACE_DIR = pathlib.Path(__file__).resolve().parent.parent
+WORKSPACE_DIR = pathlib.Path(
+    os.environ.get("GOCOACH_WORKSPACE", str(pathlib.Path(__file__).resolve().parent.parent))
+)
 IPC_DIR = WORKSPACE_DIR / ".coach_ipc"
 REQUEST_FILE = IPC_DIR / "pending_request.json"
 RESPONSE_FILE = IPC_DIR / "response.json"
@@ -60,7 +67,7 @@ class SDKCoachManager:
         self._last_digest: Optional[str] = None
 
     def is_configured(self) -> bool:
-        return bool(
+        return HAS_AGY_SDK and bool(
             os.environ.get("GEMINI_API_KEY")
             or (
                 os.environ.get("GOOGLE_CLOUD_PROJECT")
