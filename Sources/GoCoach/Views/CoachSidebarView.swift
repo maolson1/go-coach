@@ -305,38 +305,26 @@ public struct CoachSidebarView: View {
         }
     }
 
-    // MARK: - 5. Ask Coach Footer & Token Efficiency Meter
+    // MARK: - 5. Ask Coach Footer
     private var askCoachFooter: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 8) {
-                TextField("Ask about this position (e.g. 'Why not D5?')", text: $questionInput)
-                    .textFieldStyle(.roundedBorder)
-                    .onSubmit {
-                        submitQuestion()
-                    }
-
-                Button {
+        HStack(spacing: 8) {
+            TextField("Ask about this position (e.g. 'Why not D5?')", text: $questionInput)
+                .textFieldStyle(.roundedBorder)
+                .onSubmit {
                     submitQuestion()
-                } label: {
-                    if session.isCoachStreaming {
-                        ProgressView().controlSize(.small)
-                    } else {
-                        Label(questionInput.trimmingCharacters(in: .whitespaces).isEmpty ? "Ask Coach" : "Send", systemImage: "sparkles")
-                    }
                 }
-                .buttonStyle(.borderedProminent)
-                .disabled(session.isCoachStreaming)
-            }
 
-            HStack {
-                Image(systemName: "bolt.shield.fill")
-                    .font(.system(size: 10))
-                    .foregroundStyle(.green)
-                Text("Token-Efficient Mode: \(session.ratingManager.localMovesFilteredCount) normal moves filtered locally (0 tokens) • \(session.llmCallsThisGame) coach calls (~\(session.estimatedTokensThisGame) tokens)")
-                    .font(.system(size: 10))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
+            Button {
+                submitQuestion()
+            } label: {
+                if session.isCoachStreaming {
+                    ProgressView().controlSize(.small)
+                } else {
+                    Label(questionInput.trimmingCharacters(in: .whitespaces).isEmpty ? "Ask Coach" : "Send", systemImage: "sparkles")
+                }
             }
+            .buttonStyle(.borderedProminent)
+            .disabled(session.isCoachStreaming)
         }
         .padding(12)
     }
