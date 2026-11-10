@@ -1158,13 +1158,58 @@ public struct BoardState: Codable, Sendable, Equatable {
         return lines.joined(separator: "\n")
     }
 
+    /// Summary of an SGF string for UI preview before starting a game.
+    public struct SGFInspection: Equatable, Sendable {
+        public let boardSize: Int
+        public let komi: Double
+        public let setupStoneCount: Int
+        public let totalMoves: Int
+    }
+
+    /// Inspects an SGF string and returns its board size, setup stone count, and total move count if valid.
+    public static func inspectSGF(_ rawSGF: String) -> SGFInspection? {
+        let trimmed = rawSGF.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              trimmed.contains("[") && trimmed.contains("]") else {
+            return nil
+        }
+        guard let fullBoard = fromSGF(trimmed, upToMove: nil, initialMoveOffset: 0) else {
+            return nil
+        }
+        guard !fullBoard.initialStones.isEmpty || !fullBoard.moveHistory.isEmpty || trimmed.contains("SZ[") || trimmed.contains("GM[") else {
+            return nil
+        }
+        return SGFInspection(
+            boardSize: fullBoard.size,
+            komi: fullBoard.komi,
+            setupStoneCount: fullBoard.initialStones.count,
+            totalMoves: fullBoard.moveHistory.count
+        )
+    }
+
+    /// Strips SGF text properties (`C[...]`, `GC[...]`, `PB[...]`, `PW[...]`, `EV[...]`, `GN[...]`, `RO[...]`, `SO[...]`, `AN[...]`, `US[...]`)
+    /// so bracketed text or coordinates inside comments never confuse move parsing or leak metadata.
+    private static func stripSGFTextProperties(_ sgf: String) -> String {
+        guard let regex = try? NSRegularExpression(pattern: #"(?:C|GC|PB|PW|EV|GN|RO|SO|AN|US)\[(?:\\.|[^\]])*\]"#, options: [.dotMatchesLineSeparators]) else {
+            return sgf
+        }
+        let nsRange = NSRange(sgf.startIndex..<sgf.endIndex, in: sgf)
+        return regex.stringByReplacingMatches(in: sgf, range: nsRange, withTemplate: "")
+    }
+
     /// Parses an SGF string (supporting both `AB[..]`/`AW[..]` setup stones and `;B[..]`/`;W[..]` move sequences)
     /// up to `maxMove` without preserving any external metadata (player names, event titles, or comments).
-    public static func fromSGF(_ sgf: String, upToMove maxMove: Int? = nil, initialMoveOffset: Int = 0) -> BoardState? {
+    public static func fromSGF(_ rawSGF: String, upToMove maxMove: Int? = nil, initialMoveOffset: Int = 0) -> BoardState? {
+        let sgf = stripSGFTextProperties(rawSGF)
+        let trimmed = sgf.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed.contains("[") && trimmed.contains("]") else {
+            return nil
+        }
+
         func sgfCoordToPoint(_ code: String, size: Int) -> BoardPoint? {
-            let trimmed = code.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-            guard trimmed.count == 2 else { return nil }
-            let chars = Array(trimmed)
+            let clean = code.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            guard clean.count == 2 else { return nil }
+            let chars = Array(clean)
             let col = Int(chars[0].asciiValue ?? 0) - Int(Character("a").asciiValue!)
             let row = Int(chars[1].asciiValue ?? 0) - Int(Character("a").asciiValue!)
             guard col >= 0 && col < size && row >= 0 && row < size else { return nil }
@@ -1191,20 +1236,15 @@ public struct BoardState: Codable, Sendable, Equatable {
             }
         }
 
-        var nextPlayer: StoneColor = .black
-        if sgf.range(of: #"PL\[W\]"#, options: .regularExpression) != nil {
-            nextPlayer = .white
-        }
-
         func extractSetupCoords(tag: String) -> [BoardPoint] {
             var pts: [BoardPoint] = []
-            let pattern = tag + #"(\[[a-s]{2}\]\s*)+"#
+            let pattern = tag + #"(\s*\[[a-sA-S]{2}\])+"#
             guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }
             let nsRange = NSRange(sgf.startIndex..<sgf.endIndex, in: sgf)
             for match in regex.matches(in: sgf, range: nsRange) {
                 guard let r = Range(match.range, in: sgf) else { continue }
                 let block = String(sgf[r])
-                if let coordRegex = try? NSRegularExpression(pattern: #"\[([a-s]{2})\]"#) {
+                if let coordRegex = try? NSRegularExpression(pattern: #"\[([a-sA-S]{2})\]"#) {
                     let bRange = NSRange(block.startIndex..<block.endIndex, in: block)
                     for cm in coordRegex.matches(in: block, range: bRange) {
                         if let cr = Range(cm.range(at: 1), in: block),
@@ -1223,6 +1263,13 @@ public struct BoardState: Codable, Sendable, Equatable {
         for pt in abPts { setupStones.append((.black, pt)) }
         for pt in awPts { setupStones.append((.white, pt)) }
 
+        var nextPlayer: StoneColor = (abPts.count >= 2 && awPts.isEmpty) ? .white : .black
+        if sgf.range(of: #"PL\[W\]"#, options: .regularExpression) != nil {
+            nextPlayer = .white
+        } else if sgf.range(of: #"PL\[B\]"#, options: .regularExpression) != nil {
+            nextPlayer = .black
+        }
+
         var board = BoardState(
             size: boardSize,
             komi: komi,
@@ -1231,7 +1278,7 @@ public struct BoardState: Codable, Sendable, Equatable {
             initialMoveNumber: initialMoveOffset
         )
 
-        if let moveRegex = try? NSRegularExpression(pattern: #";\s*([BW])\[([a-s]{0,2})\]"#) {
+        if let moveRegex = try? NSRegularExpression(pattern: #"(?:^|;|\]|\s)([BW])\[([a-sA-S]{0,2})\]"#) {
             let nsRange = NSRange(sgf.startIndex..<sgf.endIndex, in: sgf)
             var count = 0
             for match in moveRegex.matches(in: sgf, range: nsRange) {
@@ -1240,18 +1287,24 @@ public struct BoardState: Codable, Sendable, Equatable {
                 }
                 guard let cRange = Range(match.range(at: 1), in: sgf),
                       let pRange = Range(match.range(at: 2), in: sgf) else { continue }
-                let color: StoneColor = (sgf[cRange] == "B") ? .black : .white
+                let color: StoneColor = (sgf[cRange].uppercased() == "B") ? .black : .white
                 let coordStr = String(sgf[pRange])
                 let action: MoveAction
-                if let pt = sgfCoordToPoint(coordStr, size: boardSize) {
+                if coordStr.isEmpty || (boardSize <= 19 && coordStr.lowercased() == "tt") {
+                    action = .pass
+                } else if let pt = sgfCoordToPoint(coordStr, size: boardSize) {
                     action = .place(pt)
                 } else {
-                    action = .pass
+                    continue
                 }
                 if (try? board.play(action, color: color)) != nil {
                     count += 1
                 }
             }
+        }
+
+        guard !board.initialStones.isEmpty || !board.moveHistory.isEmpty || sgf.contains("SZ[") || sgf.contains("GM[") else {
+            return nil
         }
 
         return board

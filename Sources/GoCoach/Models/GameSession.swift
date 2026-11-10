@@ -100,8 +100,26 @@ public final class GameSession: ObservableObject {
 
     public func startNewGame(size: Int, humanColor: StoneColor, handicap: Int) {
         let komi = handicap >= 2 ? 0.5 : 6.5
+        let newBoard = BoardState(size: size, komi: komi, handicap: handicap)
+        startGame(
+            with: newBoard,
+            humanColor: humanColor,
+            welcomeMessage: "New \(size)×\(size) game started! You are playing \(humanColor.displayName) against a calibrated \(ratingManager.currentRank.label) human-like opponent. Play naturally—I'll pause the game before the opponent replies if I spot an important mistake."
+        )
+    }
+
+    public func startGameFromBoard(_ customBoard: BoardState, humanColor: StoneColor) {
+        let moveLabel = customBoard.currentMoveNumber > 0 ? " at Move #\(customBoard.currentMoveNumber)" : ""
+        startGame(
+            with: customBoard,
+            humanColor: humanColor,
+            welcomeMessage: "Loaded \(customBoard.size)×\(customBoard.size) position\(moveLabel)! You are playing \(humanColor.displayName) against a calibrated \(ratingManager.currentRank.label) human-like opponent."
+        )
+    }
+
+    private func startGame(with startingBoard: BoardState, humanColor: StoneColor, welcomeMessage: String) {
         self.humanColor = humanColor
-        self.board = BoardState(size: size, komi: komi, handicap: handicap)
+        self.board = startingBoard
         self.undoStack = []
         self.playerMoveScoreLosses = []
         self.activeIntervention = nil
@@ -116,8 +134,8 @@ public final class GameSession: ObservableObject {
         self.chatHistory = [
             ChatEntry(
                 role: "coach",
-                text: "New \(size)×\(size) game started! You are playing \(humanColor.displayName) against a calibrated \(ratingManager.currentRank.label) human-like opponent. Play naturally—I'll pause the game before the opponent replies if I spot an important mistake.",
-                moveNumber: 0
+                text: welcomeMessage,
+                moveNumber: startingBoard.currentMoveNumber
             )
         ]
 
