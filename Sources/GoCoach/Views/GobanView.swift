@@ -188,22 +188,9 @@ public struct GobanView: View {
                 }
             }
 
-            // 9. Interactive Variation Branch Overlay (numbered stones + trajectory arrows)
+            // 9. Interactive Variation Branch Overlay (numbered stones)
             if let variation = session.selectedVariation {
                 let activeSteps = Array(variation.steps.prefix(session.variationStepLimit))
-                if activeSteps.count >= 2 {
-                    var linePath = Path()
-                    for (idx, step) in activeSteps.enumerated() {
-                        let p = CGPoint(x: margin + CGFloat(step.point.col) * cell, y: margin + CGFloat(step.point.row) * cell)
-                        if idx == 0 {
-                            linePath.move(to: p)
-                        } else {
-                            linePath.addLine(to: p)
-                        }
-                    }
-                    let lineColor = variation.isRecommended ? Color.green.opacity(0.75) : Color.orange.opacity(0.75)
-                    context.stroke(linePath, with: .color(lineColor), style: StrokeStyle(lineWidth: 2.5, dash: [5, 3]))
-                }
 
                 for (idx, step) in activeSteps.enumerated() {
                     let center = CGPoint(x: margin + CGFloat(step.point.col) * cell, y: margin + CGFloat(step.point.row) * cell)
