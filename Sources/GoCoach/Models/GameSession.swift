@@ -78,8 +78,20 @@ public final class GameSession: ObservableObject {
     @Published public var latestAnalysis: KataGoAnalysisResponse? = nil
     @Published public var blackWinrate: Double = 0.50
     @Published public var blackScoreLead: Double = 0.0
-    @Published public var showOwnershipMap: Bool = false
-    @Published public var showCandidateHints: Bool = false
+    @Published public var showOwnershipMap: Bool = false {
+        didSet {
+            if showOwnershipMap && latestAnalysis?.ownership == nil {
+                Task { await ensureCurrentBoardOwnership() }
+            }
+        }
+    }
+    @Published public var showCandidateHints: Bool = false {
+        didSet {
+            if showCandidateHints && (latestAnalysis?.moveInfos.isEmpty ?? true) {
+                Task { await ensureCurrentBoardOwnership() }
+            }
+        }
+    }
 
     // Pause-on-blunder & variation state
     @Published public var activeIntervention: BlunderIntervention? = nil
@@ -963,6 +975,25 @@ public final class GameSession: ObservableObject {
         ratingManager.recordGamePerformance(playerWon: playerWon, playerMoveScoreLosses: playerMoveScoreLosses)
     }
 
+    private func ensureCurrentBoardOwnership() async {
+        let snapBoard = board
+        let snapMoveNum = snapBoard.currentMoveNumber
+        guard let eval = try? await katago.analyze(
+            board: snapBoard,
+            humanSLProfile: "",
+            maxVisits: 25,
+            includeOwnership: true
+        ) else { return }
+        if board.currentMoveNumber == snapMoveNum {
+            latestAnalysis = eval
+            blackWinrate = eval.rootInfo.winrate
+            blackScoreLead = eval.rootInfo.scoreLead
+            if isReviewMode, currentReviewMoveIndex < reviewBoards.count {
+                reviewEvaluations[currentReviewMoveIndex] = eval
+            }
+        }
+    }
+
     public func copySGFToClipboard() {
         let sgf = board.toSGF(
             playerBlackName: humanColor == .black ? "Student (\(ratingManager.currentRank.label))" : "KataGo (\(ratingManager.currentRank.label))",
@@ -1009,6 +1040,7 @@ public final class GameSession: ObservableObject {
         self.reviewBoards = boardsByPly
         self.reviewEvaluations = [:]
         self.currentReviewMoveIndex = totalMoves
+        self.latestAnalysis = nil
         self.board = fullBoard
         self.undoStack = []
         self.activeIntervention = nil
@@ -1036,6 +1068,11 @@ public final class GameSession: ObservableObject {
                 Task { @MainActor [weak self] in
                     guard let self = self, self.isReviewMode, let turn = resp.turnNumber else { return }
                     self.reviewEvaluations[turn] = resp
+                    if turn == self.currentReviewMoveIndex {
+                        self.latestAnalysis = resp
+                        self.blackWinrate = resp.rootInfo.winrate
+                        self.blackScoreLead = resp.rootInfo.scoreLead
+                    }
                     let completedMoves = max(0, self.reviewEvaluations.count - 1)
                     self.reviewScanProgress = min(totalMoves, completedMoves)
                     self.statusText = self.reviewTitle
@@ -1168,6 +1205,23 @@ public final class GameSession: ObservableObject {
             latestAnalysis = eval
             blackWinrate = eval.rootInfo.winrate
             blackScoreLead = eval.rootInfo.scoreLead
+        } else {
+            let targetBoard = board
+            Task { @MainActor [weak self] in
+                guard let self = self,
+                      let fresh = try? await self.katago.analyze(
+                          board: targetBoard,
+                          humanSLProfile: "",
+                          maxVisits: 20,
+                          includeOwnership: true
+                      ) else { return }
+                if self.isReviewMode && self.currentReviewMoveIndex == clamped {
+                    self.reviewEvaluations[clamped] = fresh
+                    self.latestAnalysis = fresh
+                    self.blackWinrate = fresh.rootInfo.winrate
+                    self.blackScoreLead = fresh.rootInfo.scoreLead
+                }
+            }
         }
 
         if let matchingMistake = reviewMistakes.first(where: { $0.moveNumber == board.currentMoveNumber }) {
@@ -1299,13 +1353,22 @@ public final class GameSession: ObservableObject {
             }
         }
 
-        // Update variations with the upgraded 200-visit preEval and postEval
+        // Update variations and live board analysis (including ownership map) with the upgraded 200-visit preEval and postEval
         if let idx = reviewMistakes.firstIndex(where: { $0.id == mistake.id }) {
             reviewMistakes[idx].preAnalysis = preEval
             reviewMistakes[idx].postAnalysis = postEval
             reviewMistakes[idx].bestMoveGTP = bestMoveGTP
         }
+        if let plyIndex = reviewBoards.firstIndex(where: { $0.currentMoveNumber == mistake.moveNumber }) {
+            if plyIndex > 0 {
+                reviewEvaluations[plyIndex - 1] = preEval
+            }
+            reviewEvaluations[plyIndex] = postEval
+        }
         if selectedReviewMistakeID == mistake.id {
+            latestAnalysis = postEval
+            blackWinrate = postEval.rootInfo.winrate
+            blackScoreLead = postEval.rootInfo.scoreLead
             variationBranches = buildVariationBranches(
                 boardBefore: mistake.boardBeforeMove,
                 mover: mistake.color,

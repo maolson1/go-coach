@@ -335,7 +335,7 @@ public actor KataGoService {
             "moves": movesPayload,
             "analyzeTurns": turns,
             "maxVisits": maxVisits,
-            "includeOwnership": false,
+            "includeOwnership": true,
             "includePolicy": false
         ]
         if !initialStonesPayload.isEmpty {
