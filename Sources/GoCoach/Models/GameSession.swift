@@ -100,6 +100,7 @@ public final class GameSession: ObservableObject {
 
     // Game review state
     @Published public var isReviewMode: Bool = false
+    @Published public var reviewTitle: String = "Game Review"
     @Published public var isScanningReview: Bool = false
     @Published public var reviewScanProgress: Int = 0
     @Published public var reviewScanTotal: Int = 0
@@ -646,8 +647,15 @@ public final class GameSession: ObservableObject {
         profile: String,
         fallbackAnalysis: KataGoAnalysisResponse
     ) async -> [String] {
-        let refBoard = activeIntervention?.boardBeforeMove ?? board
-        let refAnalysis = activeIntervention?.preAnalysis ?? fallbackAnalysis
+        let activeReviewedMistake = isReviewMode
+            ? reviewMistakes.first(where: { $0.id == selectedReviewMistakeID })
+            : nil
+        let refBoard = activeIntervention?.boardBeforeMove
+            ?? activeReviewedMistake?.boardBeforeMove
+            ?? board
+        let refAnalysis = activeIntervention?.preAnalysis
+            ?? activeReviewedMistake?.preAnalysis
+            ?? fallbackAnalysis
         let coords = BoardState.extractMentionedCoordinates(from: question, boardSize: refBoard.size)
         guard !coords.isEmpty else { return [] }
 
@@ -967,7 +975,11 @@ public final class GameSession: ObservableObject {
 
     // MARK: - Game Review Mode
 
-    public func startGameReview(fullBoard: BoardState, reviewColor: StoneColor?) {
+    public func startGameReview(
+        fullBoard: BoardState,
+        reviewColor: StoneColor?,
+        reviewTitle: String = "Game Review: Black vs White"
+    ) {
         reviewScanTask?.cancel()
         reviewScanTask = nil
 
@@ -987,6 +999,8 @@ public final class GameSession: ObservableObject {
 
         let totalMoves = fullBoard.moveHistory.count
         self.isReviewMode = true
+        self.reviewTitle = reviewTitle
+        self.statusText = reviewTitle
         self.isScanningReview = totalMoves > 0
         self.reviewScanProgress = 0
         self.reviewScanTotal = totalMoves
@@ -1007,130 +1021,140 @@ public final class GameSession: ObservableObject {
             self.humanColor = side
         }
 
-        let targetLabel = reviewColor?.displayName ?? "Black & White"
-        self.chatHistory = [
-            ChatEntry(
-                role: "coach",
-                text: "Scanning \(totalMoves) moves with KataGo to find major mistakes (\(targetLabel), threshold ≥ \(String(format: "%.1f", blunderScoreThreshold)) pts). Click any mistake in the list as it appears to see the variations and get a coaching explanation!",
-                moveNumber: 0
-            )
-        ]
+        self.chatHistory = []
 
-        let profile = ratingManager.currentRank.kataGoHumanSLProfile
         reviewScanTask = Task { [weak self] in
             guard let self = self else { return }
-            var prevEval: KataGoAnalysisResponse? = nil
+            let allTurns = Array(0...totalMoves)
+            var evaluatedPlies: Set<Int> = []
 
-            for ply in 0...totalMoves {
-                if Task.isCancelled { break }
-                let plyBoard = self.reviewBoards[ply]
-                guard let eval = try? await self.katago.analyze(
-                    board: plyBoard,
-                    humanSLProfile: profile,
-                    maxVisits: 25,
-                    includeOwnership: true
-                ) else {
-                    continue
-                }
-                if Task.isCancelled { break }
+            try? await self.katago.analyzeGameTurns(
+                board: fullBoard,
+                turns: allTurns,
+                maxVisits: 12
+            ) { [weak self] resp in
+                Task { @MainActor [weak self] in
+                    guard let self = self, self.isReviewMode, let turn = resp.turnNumber else { return }
+                    self.reviewEvaluations[turn] = resp
+                    let completedMoves = max(0, self.reviewEvaluations.count - 1)
+                    self.reviewScanProgress = min(totalMoves, completedMoves)
+                    self.statusText = self.reviewTitle
 
-                self.reviewEvaluations[ply] = eval
-                self.reviewScanProgress = ply
-                self.statusText = ply < totalMoves
-                    ? "Reviewing game: Move \(ply) / \(totalMoves)..."
-                    : "Review complete — \(self.reviewMistakes.count) major mistakes found"
-
-                if ply > 0, let pre = prevEval {
-                    let playedMove = plyBoard.moveHistory[ply - 1]
-                    let mover = playedMove.color
-                    let sign: Double = (mover == .black) ? 1.0 : -1.0
-
-                    let bestPreLead = pre.moveInfos.first?.scoreLead ?? pre.rootInfo.scoreLead
-                    let bestPreWinrate = pre.moveInfos.first?.winrate ?? pre.rootInfo.winrate
-                    let postLead = eval.rootInfo.scoreLead
-                    let postWinrate = eval.rootInfo.winrate
-
-                    let rawScoreLoss = (bestPreLead - postLead) * sign
-                    let rawWinrateDrop = (bestPreWinrate - postWinrate) * sign * 100.0
-                    let bestMoveGTP = pre.moveInfos.first?.move ?? "pass"
-                    let playedGTP = playedMove.action.toGTP(boardSize: plyBoard.size)
-                    let isTopMove = (playedGTP.uppercased() == bestMoveGTP.uppercased())
-                    let scoreLoss = isTopMove ? 0.0 : max(0.0, rawScoreLoss)
-                    let winrateDrop = isTopMove ? 0.0 : max(0.0, rawWinrateDrop)
-
-                    // Update board move history so the winrate sparkline updates live
-                    self.board.updateMoveEvaluation(
-                        atIndex: ply - 1,
-                        blackWinrateAfter: postWinrate,
-                        blackScoreLeadAfter: postLead,
-                        scoreLoss: scoreLoss,
-                        winrateDropPercent: winrateDrop
-                    )
-                    if ply < self.reviewBoards.count {
-                        for idx in ply..<self.reviewBoards.count {
-                            self.reviewBoards[idx].updateMoveEvaluation(
-                                atIndex: ply - 1,
-                                blackWinrateAfter: postWinrate,
-                                blackScoreLeadAfter: postLead,
-                                scoreLoss: scoreLoss,
-                                winrateDropPercent: winrateDrop
-                            )
+                    // A newly arrived `turn` can complete move `turn` (comparing `turn - 1` -> `turn`)
+                    // and/or move `turn + 1` (comparing `turn` -> `turn + 1` if `turn + 1` finished slightly earlier)
+                    for candidatePly in [turn, turn + 1] {
+                        guard candidatePly >= 1,
+                              candidatePly <= totalMoves,
+                              !evaluatedPlies.contains(candidatePly),
+                              let pre = self.reviewEvaluations[candidatePly - 1],
+                              let post = self.reviewEvaluations[candidatePly] else {
+                            continue
                         }
-                    }
-
-                    let matchesSide = (reviewColor == nil || reviewColor == mover)
-                    let isMistake = matchesSide && !isTopMove &&
-                        (scoreLoss >= self.blunderScoreThreshold || winrateDrop >= self.blunderWinrateThreshold)
-
-                    if isMistake {
-                        let severity: String
-                        if scoreLoss >= 8.0 || winrateDrop >= 20.0 {
-                            severity = "major_blunder"
-                        } else if scoreLoss >= 4.5 || winrateDrop >= 12.0 {
-                            severity = "blunder"
-                        } else {
-                            severity = "mistake"
-                        }
-
-                        var updatedMove = playedMove
-                        updatedMove.blackWinrateAfter = postWinrate
-                        updatedMove.blackScoreLeadAfter = postLead
-                        updatedMove.scoreLoss = scoreLoss
-                        updatedMove.winrateDropPercent = winrateDrop
-
-                        let mistake = ReviewedMistake(
-                            moveNumber: playedMove.moveNumber,
-                            color: mover,
-                            playedMove: updatedMove,
-                            playedMoveGTP: playedGTP,
-                            bestMoveGTP: bestMoveGTP,
-                            scoreLoss: scoreLoss,
-                            winrateDropPercent: winrateDrop,
-                            severityLabel: severity,
-                            boardBeforeMove: self.reviewBoards[ply - 1],
-                            boardAfterMove: self.reviewBoards[ply],
-                            preAnalysis: pre,
-                            postAnalysis: eval
+                        evaluatedPlies.insert(candidatePly)
+                        self.processReviewedPly(
+                            ply: candidatePly,
+                            pre: pre,
+                            post: post,
+                            reviewColor: reviewColor
                         )
-                        self.reviewMistakes.append(mistake)
                     }
                 }
-
-                prevEval = eval
             }
 
             self.isScanningReview = false
             if !Task.isCancelled {
-                self.statusText = "Review complete — \(self.reviewMistakes.count) major mistake\(self.reviewMistakes.count == 1 ? "" : "s") found"
+                self.statusText = self.reviewTitle
             }
         }
+    }
+
+    private func processReviewedPly(
+        ply: Int,
+        pre: KataGoAnalysisResponse,
+        post: KataGoAnalysisResponse,
+        reviewColor: StoneColor?
+    ) {
+        let plyBoard = reviewBoards[ply]
+        let playedMove = plyBoard.moveHistory[ply - 1]
+        let mover = playedMove.color
+        let sign: Double = (mover == .black) ? 1.0 : -1.0
+
+        let bestPreLead = pre.moveInfos.first?.scoreLead ?? pre.rootInfo.scoreLead
+        let bestPreWinrate = pre.moveInfos.first?.winrate ?? pre.rootInfo.winrate
+        let postLead = post.rootInfo.scoreLead
+        let postWinrate = post.rootInfo.winrate
+
+        let rawScoreLoss = (bestPreLead - postLead) * sign
+        let rawWinrateDrop = (bestPreWinrate - postWinrate) * sign * 100.0
+        let bestMoveGTP = pre.moveInfos.first?.move ?? "pass"
+        let playedGTP = playedMove.action.toGTP(boardSize: plyBoard.size)
+        let isTopMove = (playedGTP.uppercased() == bestMoveGTP.uppercased())
+        let scoreLoss = isTopMove ? 0.0 : max(0.0, rawScoreLoss)
+        let winrateDrop = isTopMove ? 0.0 : max(0.0, rawWinrateDrop)
+
+        board.updateMoveEvaluation(
+            atIndex: ply - 1,
+            blackWinrateAfter: postWinrate,
+            blackScoreLeadAfter: postLead,
+            scoreLoss: scoreLoss,
+            winrateDropPercent: winrateDrop
+        )
+        if ply < reviewBoards.count {
+            for idx in ply..<reviewBoards.count {
+                reviewBoards[idx].updateMoveEvaluation(
+                    atIndex: ply - 1,
+                    blackWinrateAfter: postWinrate,
+                    blackScoreLeadAfter: postLead,
+                    scoreLoss: scoreLoss,
+                    winrateDropPercent: winrateDrop
+                )
+            }
+        }
+
+        let matchesSide = (reviewColor == nil || reviewColor == mover)
+        let isMistake = matchesSide && !isTopMove &&
+            (scoreLoss >= blunderScoreThreshold || winrateDrop >= blunderWinrateThreshold)
+
+        guard isMistake else { return }
+
+        let severity: String
+        if scoreLoss >= 8.0 || winrateDrop >= 20.0 {
+            severity = "major_blunder"
+        } else if scoreLoss >= 4.5 || winrateDrop >= 12.0 {
+            severity = "blunder"
+        } else {
+            severity = "mistake"
+        }
+
+        var updatedMove = playedMove
+        updatedMove.blackWinrateAfter = postWinrate
+        updatedMove.blackScoreLeadAfter = postLead
+        updatedMove.scoreLoss = scoreLoss
+        updatedMove.winrateDropPercent = winrateDrop
+
+        let mistake = ReviewedMistake(
+            moveNumber: playedMove.moveNumber,
+            color: mover,
+            playedMove: updatedMove,
+            playedMoveGTP: playedGTP,
+            bestMoveGTP: bestMoveGTP,
+            scoreLoss: scoreLoss,
+            winrateDropPercent: winrateDrop,
+            severityLabel: severity,
+            boardBeforeMove: reviewBoards[ply - 1],
+            boardAfterMove: reviewBoards[ply],
+            preAnalysis: pre,
+            postAnalysis: post
+        )
+        reviewMistakes.append(mistake)
+        reviewMistakes.sort { $0.moveNumber < $1.moveNumber }
     }
 
     public func stopReviewScan() {
         reviewScanTask?.cancel()
         reviewScanTask = nil
         isScanningReview = false
-        statusText = "Review scan paused — \(reviewMistakes.count) mistake\(reviewMistakes.count == 1 ? "" : "s") found"
+        statusText = reviewTitle
     }
 
     public func stepReviewMove(to index: Int) {
@@ -1160,7 +1184,7 @@ public final class GameSession: ObservableObject {
             variationBranches = []
         }
 
-        statusText = "Reviewing Move #\(board.currentMoveNumber) of \(reviewBoards.count - 1)"
+        statusText = reviewTitle
     }
 
     public func resumePlayingFromReviewPosition() {
@@ -1184,7 +1208,7 @@ public final class GameSession: ObservableObject {
         latestAnalysis = mistake.postAnalysis
         blackWinrate = mistake.postAnalysis.rootInfo.winrate
         blackScoreLead = mistake.postAnalysis.rootInfo.scoreLead
-        statusText = "Reviewing Move #\(mistake.moveNumber): \(mistake.color.displayName) \(mistake.playedMoveGTP) (Best: \(mistake.bestMoveGTP))"
+        statusText = reviewTitle
 
         variationBranches = buildVariationBranches(
             boardBefore: mistake.boardBeforeMove,
@@ -1216,16 +1240,26 @@ public final class GameSession: ObservableObject {
     private func explainReviewedMistake(_ mistake: ReviewedMistake) async {
         let profile = ratingManager.currentRank.kataGoHumanSLProfile
         var preEval = mistake.preAnalysis
-        let postEval = mistake.postAnalysis
+        var postEval = mistake.postAnalysis
 
-        // Upgrade `preEval` to full 200-visit depth so tactical PVs are super sharp
-        if let deepPre = try? await katago.analyze(
+        // Upgrade `preEval` and `postEval` concurrently with Human SL + Ownership when the mistake is clicked
+        async let deepPreTask = try? katago.analyze(
             board: mistake.boardBeforeMove,
             humanSLProfile: profile,
             maxVisits: 200,
             includeOwnership: true
-        ) {
+        )
+        async let deepPostTask = try? katago.analyze(
+            board: mistake.boardAfterMove,
+            humanSLProfile: profile,
+            maxVisits: 55,
+            includeOwnership: true
+        )
+        if let deepPre = await deepPreTask {
             preEval = deepPre
+        }
+        if let deepPost = await deepPostTask {
+            postEval = deepPost
         }
 
         let bestInfo = preEval.moveInfos.first
@@ -1265,9 +1299,10 @@ public final class GameSession: ObservableObject {
             }
         }
 
-        // Update variations with the upgraded 200-visit preEval
+        // Update variations with the upgraded 200-visit preEval and postEval
         if let idx = reviewMistakes.firstIndex(where: { $0.id == mistake.id }) {
             reviewMistakes[idx].preAnalysis = preEval
+            reviewMistakes[idx].postAnalysis = postEval
             reviewMistakes[idx].bestMoveGTP = bestMoveGTP
         }
         if selectedReviewMistakeID == mistake.id {

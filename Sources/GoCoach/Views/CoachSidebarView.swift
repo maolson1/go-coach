@@ -145,7 +145,7 @@ public struct CoachSidebarView: View {
             HStack(spacing: 8) {
                 Image(systemName: "exclamationmark.bubble.fill")
                     .foregroundStyle(.orange)
-                Text("Game Review — Major Mistakes (\(session.reviewMistakes.count))")
+                Text("Mistakes (\(session.reviewMistakes.count))")
                     .font(.system(size: 12, weight: .bold))
                 Spacer()
                 if session.isScanningReview {

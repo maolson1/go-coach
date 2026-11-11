@@ -29,6 +29,7 @@ public struct LoadSGFSheet: View {
 
     @State private var loadMode: LoadMode = .reviewGame
     @State private var sgfText: String = ""
+    @State private var loadedFilename: String? = nil
     @State private var sgfInspection: BoardState.SGFInspection? = nil
     @State private var sgfStartMove: Int = 0
     @State private var sgfPreviewBoard: BoardState? = nil
@@ -77,6 +78,7 @@ public struct LoadSGFSheet: View {
                     HStack(spacing: 8) {
                         Button {
                             if let pasted = NSPasteboard.general.string(forType: .string) {
+                                loadedFilename = nil
                                 loadSGFString(pasted)
                             }
                         } label: {
@@ -94,6 +96,7 @@ public struct LoadSGFSheet: View {
                         if !sgfText.isEmpty {
                             Button("Clear") {
                                 sgfText = ""
+                                loadedFilename = nil
                                 sgfInspection = nil
                                 sgfPreviewBoard = nil
                                 sgfFileError = nil
@@ -226,7 +229,13 @@ public struct LoadSGFSheet: View {
                     session.blunderScoreThreshold = mistakeThreshold
                     if loadMode == .reviewGame {
                         if let fullBoard = BoardState.fromSGF(sgfText, upToMove: nil) {
-                            session.startGameReview(fullBoard: fullBoard, reviewColor: reviewSide.stoneColor)
+                            let headerTitle = sgfInspection?.formattedReviewHeader(sourceFilename: loadedFilename)
+                                ?? "Game Review: Black vs White"
+                            session.startGameReview(
+                                fullBoard: fullBoard,
+                                reviewColor: reviewSide.stoneColor,
+                                reviewTitle: headerTitle
+                            )
                             dismiss()
                         }
                     } else if let customBoard = sgfPreviewBoard {
@@ -304,6 +313,7 @@ public struct LoadSGFSheet: View {
                 } else {
                     contents = try String(contentsOf: url, encoding: .isoLatin1)
                 }
+                loadedFilename = url.lastPathComponent
                 loadSGFString(contents)
             } catch {
                 sgfFileError = "Could not read file: \(error.localizedDescription)"

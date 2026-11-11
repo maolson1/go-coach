@@ -106,64 +106,44 @@ public struct MainWindowView: View {
 
             Spacer()
 
-            // Quick board size switcher
-            Menu {
-                Button("New 9×9 Game") {
-                    session.startNewGame(size: 9, humanColor: session.humanColor, handicap: 0)
-                }
-                Button("New 13×13 Game") {
-                    session.startNewGame(size: 13, humanColor: session.humanColor, handicap: 0)
-                }
-                Button("New 19×19 Game") {
-                    session.startNewGame(size: 19, humanColor: session.humanColor, handicap: 0)
-                }
-                Divider()
-                Button("Custom Game Setup...") {
-                    showingNewGameSheet = true
-                }
-            } label: {
-                Label("\(session.board.size)×\(session.board.size)", systemImage: "square.grid.3x3")
+            // Rank & dynamic calibration menu (hidden during game review)
+            if !session.isReviewMode {
+                Menu {
+                    Toggle("Dynamic Auto-Calibration", isOn: Binding(
+                        get: { session.ratingManager.autoCalibrateStrength },
+                        set: { session.ratingManager.autoCalibrateStrength = $0 }
+                    ))
+                    Divider()
+                    ForEach([20, 15, 12, 10, 8, 6, 4, 2, 1], id: \.self) { k in
+                        let r = GoRank(label: "\(k)k")
+                        Button("Set Rank: \(r.label)") {
+                            session.ratingManager.setManualRank(r)
+                        }
+                    }
+                    Divider()
+                    ForEach(1...5, id: \.self) { d in
+                        let r = GoRank(label: "\(d)d")
+                        Button("Set Rank: \(r.label)") {
+                            session.ratingManager.setManualRank(r)
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "person.badge.shield.checkmark.fill")
+                        Text("Rank: \(session.ratingManager.currentRank.label)")
+                        if session.ratingManager.autoCalibrateStrength {
+                            Text("(Auto)")
+                                .foregroundStyle(.secondary)
+                        }
+                    }
                     .font(.system(size: 12, weight: .medium))
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(Color.accentColor.opacity(0.12), in: Capsule())
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
             }
-            .menuStyle(.borderlessButton)
-            .fixedSize()
-
-            // Rank & dynamic calibration menu
-            Menu {
-                Toggle("Dynamic Auto-Calibration", isOn: Binding(
-                    get: { session.ratingManager.autoCalibrateStrength },
-                    set: { session.ratingManager.autoCalibrateStrength = $0 }
-                ))
-                Divider()
-                ForEach([20, 15, 12, 10, 8, 6, 4, 2, 1], id: \.self) { k in
-                    let r = GoRank(label: "\(k)k")
-                    Button("Set Rank: \(r.label)") {
-                        session.ratingManager.setManualRank(r)
-                    }
-                }
-                Divider()
-                ForEach(1...5, id: \.self) { d in
-                    let r = GoRank(label: "\(d)d")
-                    Button("Set Rank: \(r.label)") {
-                        session.ratingManager.setManualRank(r)
-                    }
-                }
-            } label: {
-                HStack(spacing: 4) {
-                    Image(systemName: "person.badge.shield.checkmark.fill")
-                    Text("Rank: \(session.ratingManager.currentRank.label)")
-                    if session.ratingManager.autoCalibrateStrength {
-                        Text("(Auto)")
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                .font(.system(size: 12, weight: .medium))
-                .padding(.horizontal, 8)
-                .padding(.vertical, 3)
-                .background(Color.accentColor.opacity(0.12), in: Capsule())
-            }
-            .menuStyle(.borderlessButton)
-            .fixedSize()
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 9)

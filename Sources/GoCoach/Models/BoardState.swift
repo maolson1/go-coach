@@ -1211,6 +1211,78 @@ public struct BoardState: Codable, Sendable, Equatable {
         public let komi: Double
         public let setupStoneCount: Int
         public let totalMoves: Int
+        public let playerBlack: String?
+        public let playerWhite: String?
+        public let dateText: String?
+
+        /// Builds a clean header title `"Game Review: X vs Y [DATETIME]"` from SGF tags and/or filename.
+        public func formattedReviewHeader(sourceFilename: String? = nil) -> String {
+            var fileDateTime: String? = nil
+            var filePlayers: String? = nil
+
+            if let filename = sourceFilename?.trimmingCharacters(in: .whitespacesAndNewlines), !filename.isEmpty {
+                let stem = (filename as NSString).deletingPathExtension
+                let parts = stem.components(separatedBy: " - ")
+                if parts.count >= 2 {
+                    let first = parts[0].trimmingCharacters(in: .whitespacesAndNewlines)
+                    let rest = parts.dropFirst().joined(separator: " - ").trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !first.isEmpty { fileDateTime = first }
+                    if !rest.isEmpty { filePlayers = rest }
+                } else if stem.contains(" vs ") {
+                    filePlayers = stem
+                }
+            }
+
+            let pb = playerBlack?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let pw = playerWhite?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let players: String
+            if let pb = pb, !pb.isEmpty, let pw = pw, !pw.isEmpty {
+                players = "\(pb) vs \(pw)"
+            } else if let fp = filePlayers, !fp.isEmpty {
+                players = fp
+            } else if let pb = pb, !pb.isEmpty {
+                players = "\(pb) vs White"
+            } else if let pw = pw, !pw.isEmpty {
+                players = "Black vs \(pw)"
+            } else {
+                players = "Black vs White"
+            }
+
+            let sgfDT = dateText?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let chosenDateTime: String?
+            if let fdt = fileDateTime, !fdt.isEmpty, let sdt = sgfDT, !sdt.isEmpty {
+                chosenDateTime = fdt.count >= sdt.count ? fdt : sdt
+            } else if let fdt = fileDateTime, !fdt.isEmpty {
+                chosenDateTime = fdt
+            } else if let sdt = sgfDT, !sdt.isEmpty {
+                chosenDateTime = sdt
+            } else {
+                chosenDateTime = nil
+            }
+
+            if let dt = chosenDateTime, !dt.isEmpty {
+                return "Game Review: \(players) [\(dt)]"
+            } else {
+                return "Game Review: \(players)"
+            }
+        }
+    }
+
+    private static func extractSGFProperty(_ tag: String, from sgf: String) -> String? {
+        let pattern = #"(?:^|[^A-Z])"# + tag + #"\[((?:\\.|[^\]])*)\]"#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.dotMatchesLineSeparators]) else {
+            return nil
+        }
+        let nsRange = NSRange(sgf.startIndex..<sgf.endIndex, in: sgf)
+        guard let match = regex.firstMatch(in: sgf, range: nsRange),
+              let valRange = Range(match.range(at: 1), in: sgf) else {
+            return nil
+        }
+        let rawVal = String(sgf[valRange])
+            .replacingOccurrences(of: #"\]"#, with: "]")
+            .replacingOccurrences(of: #"\\"#, with: "\\")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return rawVal.isEmpty ? nil : rawVal
     }
 
     /// Inspects an SGF string and returns its board size, setup stone count, and total move count if valid.
@@ -1230,7 +1302,10 @@ public struct BoardState: Codable, Sendable, Equatable {
             boardSize: fullBoard.size,
             komi: fullBoard.komi,
             setupStoneCount: fullBoard.initialStones.count,
-            totalMoves: fullBoard.moveHistory.count
+            totalMoves: fullBoard.moveHistory.count,
+            playerBlack: extractSGFProperty("PB", from: trimmed),
+            playerWhite: extractSGFProperty("PW", from: trimmed),
+            dateText: extractSGFProperty("DT", from: trimmed)
         )
     }
 

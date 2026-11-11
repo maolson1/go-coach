@@ -73,11 +73,18 @@ public struct KataGoAnalysisResponse: Codable, Sendable, Equatable {
 }
 
 public actor KataGoService {
+    private struct MultiTurnState {
+        var remaining: Int
+        let onTurn: @Sendable (KataGoAnalysisResponse) -> Void
+        let continuation: CheckedContinuation<Void, Error>
+    }
+
     private var process: Process?
     private var stdinPipe: Pipe?
     private var stdoutPipe: Pipe?
     private var stderrPipe: Pipe?
     private var pendingContinuations: [String: CheckedContinuation<KataGoAnalysisResponse, Error>] = [:]
+    private var multiTurnStates: [String: MultiTurnState] = [:]
     private var readTask: Task<Void, Never>?
     public private(set) var isReady: Bool = false
     public private(set) var hasHumanSLModel: Bool = false
@@ -106,7 +113,7 @@ public actor KataGoService {
             "-config", configPath,
             "-model", mainModelPath,
             "-override-config",
-            "logDir=\(logDir),logToStderr=false,numAnalysisThreads=2,numSearchThreadsPerAnalysisThread=8,reportAnalysisWinratesAs=BLACK,maxVisits=200"
+            "logDir=\(logDir),logToStderr=false,numAnalysisThreads=8,numSearchThreadsPerAnalysisThread=4,reportAnalysisWinratesAs=BLACK,maxVisits=200"
         ]
 
         if let humanPath = humanModelPath, FileManager.default.fileExists(atPath: humanPath) {
@@ -170,6 +177,11 @@ public actor KataGoService {
         for (_, cont) in all {
             cont.resume(throwing: err)
         }
+        let allMulti = multiTurnStates
+        multiTurnStates.removeAll()
+        for (_, st) in allMulti {
+            st.continuation.resume(throwing: err)
+        }
     }
 
     private func handleOutputLine(_ data: Data) {
@@ -182,14 +194,23 @@ public actor KataGoService {
                     code: 3,
                     userInfo: [NSLocalizedDescriptionKey: "KataGo query error: \(errStr)"]
                 )
-                if let id = rawObj["id"] as? String,
-                   let cont = pendingContinuations.removeValue(forKey: id) {
-                    cont.resume(throwing: err)
+                if let id = rawObj["id"] as? String {
+                    if let cont = pendingContinuations.removeValue(forKey: id) {
+                        cont.resume(throwing: err)
+                    }
+                    if let st = multiTurnStates.removeValue(forKey: id) {
+                        st.continuation.resume(throwing: err)
+                    }
                 } else {
                     let all = pendingContinuations
                     pendingContinuations.removeAll()
                     for (_, cont) in all {
                         cont.resume(throwing: err)
+                    }
+                    let allMulti = multiTurnStates
+                    multiTurnStates.removeAll()
+                    for (_, st) in allMulti {
+                        st.continuation.resume(throwing: err)
                     }
                 }
             }
@@ -212,6 +233,15 @@ public actor KataGoService {
         }
         if let cont = pendingContinuations.removeValue(forKey: resp.id) {
             cont.resume(returning: resp)
+        } else if var st = multiTurnStates[resp.id] {
+            st.onTurn(resp)
+            st.remaining -= 1
+            if st.remaining <= 0 {
+                multiTurnStates.removeValue(forKey: resp.id)
+                st.continuation.resume(returning: ())
+            } else {
+                multiTurnStates[resp.id] = st
+            }
         }
     }
 
@@ -269,6 +299,88 @@ public actor KataGoService {
                 pendingContinuations.removeValue(forKey: reqId)
                 continuation.resume(throwing: error)
             }
+        }
+    }
+
+    /// Fast parallel multi-turn game scan using KataGo's native `analyzeTurns` batching.
+    /// Evaluates only the primary KataGo network (omitting the secondary Human SL network and ownership arrays)
+    /// across all `numAnalysisThreads` concurrently, streaming each turn's evaluation as soon as it completes.
+    public func analyzeGameTurns(
+        board: BoardState,
+        turns: [Int],
+        maxVisits: Int = 12,
+        onTurnResult: @escaping @Sendable (KataGoAnalysisResponse) -> Void
+    ) async throws {
+        guard !turns.isEmpty else { return }
+        try startIfNeeded()
+        guard let inHandle = stdinPipe?.fileHandleForWriting else {
+            throw NSError(domain: "KataGoService", code: 1, userInfo: [NSLocalizedDescriptionKey: "KataGo stdin unavailable"])
+        }
+
+        let reqId = UUID().uuidString
+        let initialStonesPayload: [[String]] = board.initialStones.map { (color, pt) in
+            [color.rawValue, pt.toGTP(boardSize: board.size)]
+        }
+        let movesPayload: [[String]] = board.moveHistory.map { rec in
+            [rec.color.rawValue, rec.action.toGTP(boardSize: board.size)]
+        }
+
+        let safeKomi = min(150.0, max(-150.0, (board.komi * 2.0).rounded() / 2.0))
+        var query: [String: Any] = [
+            "id": reqId,
+            "rules": "japanese",
+            "komi": safeKomi,
+            "boardXSize": board.size,
+            "boardYSize": board.size,
+            "moves": movesPayload,
+            "analyzeTurns": turns,
+            "maxVisits": maxVisits,
+            "includeOwnership": false,
+            "includePolicy": false
+        ]
+        if !initialStonesPayload.isEmpty {
+            query["initialStones"] = initialStonesPayload
+            query["initialPlayer"] = board.initialPlayer.rawValue
+        }
+
+        let jsonData = try JSONSerialization.data(withJSONObject: query, options: [])
+        var lineData = jsonData
+        lineData.append(UInt8(ascii: "\n"))
+
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                multiTurnStates[reqId] = MultiTurnState(
+                    remaining: turns.count,
+                    onTurn: onTurnResult,
+                    continuation: continuation
+                )
+                do {
+                    try inHandle.write(contentsOf: lineData)
+                } catch {
+                    multiTurnStates.removeValue(forKey: reqId)
+                    continuation.resume(throwing: error)
+                }
+            }
+        } onCancel: {
+            Task {
+                await self.cancelMultiTurnQuery(id: reqId)
+            }
+        }
+    }
+
+    public func cancelMultiTurnQuery(id: String) {
+        if let st = multiTurnStates.removeValue(forKey: id) {
+            st.continuation.resume(returning: ())
+        }
+        guard let inHandle = stdinPipe?.fileHandleForWriting else { return }
+        let cancelPayload: [String: Any] = [
+            "id": UUID().uuidString,
+            "action": "terminate",
+            "terminateId": id
+        ]
+        if var data = try? JSONSerialization.data(withJSONObject: cancelPayload, options: []) {
+            data.append(UInt8(ascii: "\n"))
+            try? inHandle.write(contentsOf: data)
         }
     }
 
