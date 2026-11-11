@@ -31,6 +31,24 @@ public struct BlunderIntervention: Equatable, Sendable {
     public let postAnalysis: KataGoAnalysisResponse
 }
 
+public struct ReviewedMistake: Identifiable, Equatable, Sendable {
+    public var id: Int { moveNumber }
+    public let moveNumber: Int
+    public let color: StoneColor
+    public let playedMove: RecordedMove
+    public let playedMoveGTP: String
+    public var bestMoveGTP: String
+    public let scoreLoss: Double
+    public let winrateDropPercent: Double
+    public let severityLabel: String
+    public let boardBeforeMove: BoardState
+    public let boardAfterMove: BoardState
+    public var preAnalysis: KataGoAnalysisResponse
+    public var postAnalysis: KataGoAnalysisResponse
+    public var explanation: String? = nil
+    public var explanationSourceBadge: String? = nil
+}
+
 public struct ChatEntry: Identifiable, Equatable, Sendable {
     public let id: UUID
     public let role: String // "coach" or "student"
@@ -80,6 +98,18 @@ public final class GameSession: ObservableObject {
     // Game end state
     @Published public var gameResultSummary: String? = nil
 
+    // Game review state
+    @Published public var isReviewMode: Bool = false
+    @Published public var isScanningReview: Bool = false
+    @Published public var reviewScanProgress: Int = 0
+    @Published public var reviewScanTotal: Int = 0
+    @Published public var reviewMistakes: [ReviewedMistake] = []
+    @Published public var selectedReviewMistakeID: Int? = nil
+    @Published public var currentReviewMoveIndex: Int = 0
+    private var reviewBoards: [BoardState] = []
+    private var reviewEvaluations: [Int: KataGoAnalysisResponse] = [:]
+    private var reviewScanTask: Task<Void, Never>? = nil
+
     public let ratingManager: PlayerRatingManager
     private let katago = KataGoService()
     private let coachBridge = CoachBridgeService()
@@ -96,6 +126,11 @@ public final class GameSession: ObservableObject {
     public var selectedVariation: VariationBranch? {
         guard let id = selectedVariationID else { return nil }
         return variationBranches.first(where: { $0.id == id })
+    }
+
+    public var selectedReviewMistake: ReviewedMistake? {
+        guard let id = selectedReviewMistakeID else { return nil }
+        return reviewMistakes.first(where: { $0.id == id })
     }
 
     public func startNewGame(size: Int, humanColor: StoneColor, handicap: Int) {
@@ -118,6 +153,15 @@ public final class GameSession: ObservableObject {
     }
 
     private func startGame(with startingBoard: BoardState, humanColor: StoneColor, welcomeMessage: String) {
+        reviewScanTask?.cancel()
+        reviewScanTask = nil
+        isReviewMode = false
+        isScanningReview = false
+        reviewMistakes = []
+        selectedReviewMistakeID = nil
+        reviewBoards = []
+        reviewEvaluations = [:]
+
         self.humanColor = humanColor
         self.board = startingBoard
         self.undoStack = []
@@ -155,6 +199,7 @@ public final class GameSession: ObservableObject {
             selectedVariationID = nil
             return
         }
+        guard !isReviewMode else { return }
         guard activeIntervention == nil else {
             errorBanner = "Choose 'Take Back & Try Again' or 'Keep Playing' on the Coach card first."
             return
@@ -918,5 +963,400 @@ public final class GameSession: ObservableObject {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(sgf, forType: .string)
         statusText = "SGF copied to clipboard!"
+    }
+
+    // MARK: - Game Review Mode
+
+    public func startGameReview(fullBoard: BoardState, reviewColor: StoneColor?) {
+        reviewScanTask?.cancel()
+        reviewScanTask = nil
+
+        var boardsByPly: [BoardState] = []
+        var cursor = BoardState(
+            size: fullBoard.size,
+            komi: fullBoard.komi,
+            initialStones: fullBoard.initialStones,
+            initialPlayer: fullBoard.initialPlayer,
+            initialMoveNumber: fullBoard.initialMoveNumber
+        )
+        boardsByPly.append(cursor)
+        for rec in fullBoard.moveHistory {
+            _ = try? cursor.play(rec.action, color: rec.color)
+            boardsByPly.append(cursor)
+        }
+
+        let totalMoves = fullBoard.moveHistory.count
+        self.isReviewMode = true
+        self.isScanningReview = totalMoves > 0
+        self.reviewScanProgress = 0
+        self.reviewScanTotal = totalMoves
+        self.reviewMistakes = []
+        self.selectedReviewMistakeID = nil
+        self.reviewBoards = boardsByPly
+        self.reviewEvaluations = [:]
+        self.currentReviewMoveIndex = totalMoves
+        self.board = fullBoard
+        self.undoStack = []
+        self.activeIntervention = nil
+        self.variationBranches = []
+        self.selectedVariationID = nil
+        self.gameResultSummary = nil
+        self.errorBanner = nil
+
+        if let side = reviewColor {
+            self.humanColor = side
+        }
+
+        let targetLabel = reviewColor?.displayName ?? "Black & White"
+        self.chatHistory = [
+            ChatEntry(
+                role: "coach",
+                text: "Scanning \(totalMoves) moves with KataGo to find major mistakes (\(targetLabel), threshold ≥ \(String(format: "%.1f", blunderScoreThreshold)) pts). Click any mistake in the list as it appears to see the variations and get a coaching explanation!",
+                moveNumber: 0
+            )
+        ]
+
+        let profile = ratingManager.currentRank.kataGoHumanSLProfile
+        reviewScanTask = Task { [weak self] in
+            guard let self = self else { return }
+            var prevEval: KataGoAnalysisResponse? = nil
+
+            for ply in 0...totalMoves {
+                if Task.isCancelled { break }
+                let plyBoard = self.reviewBoards[ply]
+                guard let eval = try? await self.katago.analyze(
+                    board: plyBoard,
+                    humanSLProfile: profile,
+                    maxVisits: 25,
+                    includeOwnership: true
+                ) else {
+                    continue
+                }
+                if Task.isCancelled { break }
+
+                self.reviewEvaluations[ply] = eval
+                self.reviewScanProgress = ply
+                self.statusText = ply < totalMoves
+                    ? "Reviewing game: Move \(ply) / \(totalMoves)..."
+                    : "Review complete — \(self.reviewMistakes.count) major mistakes found"
+
+                if ply > 0, let pre = prevEval {
+                    let playedMove = plyBoard.moveHistory[ply - 1]
+                    let mover = playedMove.color
+                    let sign: Double = (mover == .black) ? 1.0 : -1.0
+
+                    let bestPreLead = pre.moveInfos.first?.scoreLead ?? pre.rootInfo.scoreLead
+                    let bestPreWinrate = pre.moveInfos.first?.winrate ?? pre.rootInfo.winrate
+                    let postLead = eval.rootInfo.scoreLead
+                    let postWinrate = eval.rootInfo.winrate
+
+                    let rawScoreLoss = (bestPreLead - postLead) * sign
+                    let rawWinrateDrop = (bestPreWinrate - postWinrate) * sign * 100.0
+                    let bestMoveGTP = pre.moveInfos.first?.move ?? "pass"
+                    let playedGTP = playedMove.action.toGTP(boardSize: plyBoard.size)
+                    let isTopMove = (playedGTP.uppercased() == bestMoveGTP.uppercased())
+                    let scoreLoss = isTopMove ? 0.0 : max(0.0, rawScoreLoss)
+                    let winrateDrop = isTopMove ? 0.0 : max(0.0, rawWinrateDrop)
+
+                    // Update board move history so the winrate sparkline updates live
+                    self.board.updateMoveEvaluation(
+                        atIndex: ply - 1,
+                        blackWinrateAfter: postWinrate,
+                        blackScoreLeadAfter: postLead,
+                        scoreLoss: scoreLoss,
+                        winrateDropPercent: winrateDrop
+                    )
+                    if ply < self.reviewBoards.count {
+                        for idx in ply..<self.reviewBoards.count {
+                            self.reviewBoards[idx].updateMoveEvaluation(
+                                atIndex: ply - 1,
+                                blackWinrateAfter: postWinrate,
+                                blackScoreLeadAfter: postLead,
+                                scoreLoss: scoreLoss,
+                                winrateDropPercent: winrateDrop
+                            )
+                        }
+                    }
+
+                    let matchesSide = (reviewColor == nil || reviewColor == mover)
+                    let isMistake = matchesSide && !isTopMove &&
+                        (scoreLoss >= self.blunderScoreThreshold || winrateDrop >= self.blunderWinrateThreshold)
+
+                    if isMistake {
+                        let severity: String
+                        if scoreLoss >= 8.0 || winrateDrop >= 20.0 {
+                            severity = "major_blunder"
+                        } else if scoreLoss >= 4.5 || winrateDrop >= 12.0 {
+                            severity = "blunder"
+                        } else {
+                            severity = "mistake"
+                        }
+
+                        var updatedMove = playedMove
+                        updatedMove.blackWinrateAfter = postWinrate
+                        updatedMove.blackScoreLeadAfter = postLead
+                        updatedMove.scoreLoss = scoreLoss
+                        updatedMove.winrateDropPercent = winrateDrop
+
+                        let mistake = ReviewedMistake(
+                            moveNumber: playedMove.moveNumber,
+                            color: mover,
+                            playedMove: updatedMove,
+                            playedMoveGTP: playedGTP,
+                            bestMoveGTP: bestMoveGTP,
+                            scoreLoss: scoreLoss,
+                            winrateDropPercent: winrateDrop,
+                            severityLabel: severity,
+                            boardBeforeMove: self.reviewBoards[ply - 1],
+                            boardAfterMove: self.reviewBoards[ply],
+                            preAnalysis: pre,
+                            postAnalysis: eval
+                        )
+                        self.reviewMistakes.append(mistake)
+                    }
+                }
+
+                prevEval = eval
+            }
+
+            self.isScanningReview = false
+            if !Task.isCancelled {
+                self.statusText = "Review complete — \(self.reviewMistakes.count) major mistake\(self.reviewMistakes.count == 1 ? "" : "s") found"
+            }
+        }
+    }
+
+    public func stopReviewScan() {
+        reviewScanTask?.cancel()
+        reviewScanTask = nil
+        isScanningReview = false
+        statusText = "Review scan paused — \(reviewMistakes.count) mistake\(reviewMistakes.count == 1 ? "" : "s") found"
+    }
+
+    public func stepReviewMove(to index: Int) {
+        guard isReviewMode, !reviewBoards.isEmpty else { return }
+        let clamped = max(0, min(reviewBoards.count - 1, index))
+        currentReviewMoveIndex = clamped
+        selectedVariationID = nil
+        board = reviewBoards[clamped]
+
+        if let eval = reviewEvaluations[clamped] {
+            latestAnalysis = eval
+            blackWinrate = eval.rootInfo.winrate
+            blackScoreLead = eval.rootInfo.scoreLead
+        }
+
+        if let matchingMistake = reviewMistakes.first(where: { $0.moveNumber == board.currentMoveNumber }) {
+            selectedReviewMistakeID = matchingMistake.id
+            variationBranches = buildVariationBranches(
+                boardBefore: matchingMistake.boardBeforeMove,
+                mover: matchingMistake.color,
+                playedMove: matchingMistake.playedMove,
+                preEval: matchingMistake.preAnalysis,
+                postEval: matchingMistake.postAnalysis
+            )
+        } else {
+            selectedReviewMistakeID = nil
+            variationBranches = []
+        }
+
+        statusText = "Reviewing Move #\(board.currentMoveNumber) of \(reviewBoards.count - 1)"
+    }
+
+    public func resumePlayingFromReviewPosition() {
+        guard isReviewMode else { return }
+        let targetBoard = board
+        let playColor = targetBoard.nextToPlay
+        startGameFromBoard(targetBoard, humanColor: playColor)
+    }
+
+    public func selectReviewedMistake(_ mistake: ReviewedMistake) {
+        selectedVariationID = nil
+        selectedReviewMistakeID = mistake.id
+        if let plyIndex = reviewBoards.firstIndex(where: { $0.currentMoveNumber == mistake.moveNumber }) {
+            currentReviewMoveIndex = plyIndex
+            board = reviewBoards[plyIndex]
+        } else {
+            board = mistake.boardAfterMove
+        }
+
+        humanColor = mistake.color
+        latestAnalysis = mistake.postAnalysis
+        blackWinrate = mistake.postAnalysis.rootInfo.winrate
+        blackScoreLead = mistake.postAnalysis.rootInfo.scoreLead
+        statusText = "Reviewing Move #\(mistake.moveNumber): \(mistake.color.displayName) \(mistake.playedMoveGTP) (Best: \(mistake.bestMoveGTP))"
+
+        variationBranches = buildVariationBranches(
+            boardBefore: mistake.boardBeforeMove,
+            mover: mistake.color,
+            playedMove: mistake.playedMove,
+            preEval: mistake.preAnalysis,
+            postEval: mistake.postAnalysis
+        )
+
+        if let cached = mistake.explanation, !cached.isEmpty {
+            if !chatHistory.contains(where: { $0.moveNumber == mistake.moveNumber && $0.text == cached }) {
+                chatHistory.append(
+                    ChatEntry(
+                        role: "coach",
+                        text: cached,
+                        moveNumber: mistake.moveNumber,
+                        sourceBadge: mistake.explanationSourceBadge
+                    )
+                )
+            }
+            return
+        }
+
+        Task {
+            await explainReviewedMistake(mistake)
+        }
+    }
+
+    private func explainReviewedMistake(_ mistake: ReviewedMistake) async {
+        let profile = ratingManager.currentRank.kataGoHumanSLProfile
+        var preEval = mistake.preAnalysis
+        let postEval = mistake.postAnalysis
+
+        // Upgrade `preEval` to full 200-visit depth so tactical PVs are super sharp
+        if let deepPre = try? await katago.analyze(
+            board: mistake.boardBeforeMove,
+            humanSLProfile: profile,
+            maxVisits: 200,
+            includeOwnership: true
+        ) {
+            preEval = deepPre
+        }
+
+        let bestInfo = preEval.moveInfos.first
+        let secondInfo = preEval.moveInfos.dropFirst().first
+        let bestMoveGTP = bestInfo?.move ?? mistake.bestMoveGTP
+        let oppPunishPV = postEval.moveInfos.first?.pv ?? []
+        let punishPV = [mistake.playedMoveGTP] + oppPunishPV
+
+        // Run the 1-ply follow-up query after `bestMoveGTP` for natural human reply & refutation
+        var effectiveBestPV: [String] = bestInfo?.pv ?? []
+        var humanReplyRefutationLine: String? = nil
+        if let bestPt = BoardPoint.fromGTP(bestMoveGTP, boardSize: mistake.boardBeforeMove.size) {
+            var boardAfterBest = mistake.boardBeforeMove
+            if (try? boardAfterBest.play(.place(bestPt), color: mistake.color)) != nil,
+               let afterBestEval = try? await katago.analyze(board: boardAfterBest, humanSLProfile: profile, maxVisits: 50) {
+                if let (topHumanMove, topHumanProb) = afterBestEval.topHumanPolicyMove(board: boardAfterBest),
+                   topHumanProb >= 0.12,
+                   let humanReplyInfo = afterBestEval.moveInfos.first(where: { $0.move.uppercased() == topHumanMove.uppercased() }) {
+                    let fullHumanReplyPV = [bestMoveGTP] + humanReplyInfo.pv
+                    let origSecondMove = bestInfo?.pv.dropFirst().first?.uppercased()
+                    if humanReplyInfo.pv.count >= 3 {
+                        effectiveBestPV = fullHumanReplyPV
+                    }
+                    var refDesc = String(
+                        format: "If opponent plays natural human reply %@ (%.0f%% human prior): continuation is %@ (Score: %+.1f B, Winrate: %.0f%%)",
+                        humanReplyInfo.move,
+                        topHumanProb * 100.0,
+                        fullHumanReplyPV.prefix(8).joined(separator: " -> "),
+                        humanReplyInfo.scoreLead,
+                        humanReplyInfo.winrate * 100.0
+                    )
+                    if let origReply = origSecondMove, origReply != topHumanMove.uppercased() {
+                        refDesc += " — superhuman AI sometimes tenukis at \(origReply) only because answering locally at \(humanReplyInfo.move) falls into this continuation"
+                    }
+                    humanReplyRefutationLine = refDesc
+                }
+            }
+        }
+
+        // Update variations with the upgraded 200-visit preEval
+        if let idx = reviewMistakes.firstIndex(where: { $0.id == mistake.id }) {
+            reviewMistakes[idx].preAnalysis = preEval
+            reviewMistakes[idx].bestMoveGTP = bestMoveGTP
+        }
+        if selectedReviewMistakeID == mistake.id {
+            variationBranches = buildVariationBranches(
+                boardBefore: mistake.boardBeforeMove,
+                mover: mistake.color,
+                playedMove: mistake.playedMove,
+                preEval: preEval,
+                postEval: postEval
+            )
+        }
+
+        let tags = mistake.boardAfterMove.analyzeTacticalTags(
+            played: mistake.playedMove.action,
+            bestMoveGTP: bestMoveGTP,
+            bestSecondGTP: effectiveBestPV.dropFirst().first,
+            punishFirstGTP: oppPunishPV.first,
+            mover: mistake.color,
+            boardBeforeMove: mistake.boardBeforeMove
+        )
+
+        let ownershipShifts = mistake.boardAfterMove.analyzeOwnershipShifts(
+            preOwnership: preEval.ownership,
+            postOwnership: postEval.ownership,
+            mover: mistake.color,
+            boardBeforeMove: mistake.boardBeforeMove,
+            playedMove: mistake.playedMove.action,
+            bestMoveGTP: bestMoveGTP
+        )
+
+        let pvOutcomes = BoardState.summarizePVOutcomes(
+            baseBoard: mistake.boardBeforeMove,
+            mover: mistake.color,
+            bestPV: effectiveBestPV,
+            punishPV: punishPV
+        )
+
+        let digest = mistake.boardAfterMove.buildCompactTacticalDigest(
+            playerRank: ratingManager.currentRank.label,
+            playedMove: mistake.playedMove,
+            bestMoveInfo: bestInfo,
+            secondMoveInfo: secondInfo,
+            punishmentPV: punishPV,
+            scoreLoss: mistake.scoreLoss,
+            winrateDropPercent: mistake.winrateDropPercent,
+            scoreLeadAfter: postEval.rootInfo.scoreLead,
+            tacticalTags: tags,
+            ownershipShifts: ownershipShifts,
+            pvOutcomes: pvOutcomes,
+            humanReplyRefutationLine: humanReplyRefutationLine,
+            effectiveBestPV: effectiveBestPV
+        )
+
+        let playedHumanProb = preEval.humanProbability(
+            forGTP: mistake.playedMoveGTP,
+            boardSize: mistake.boardBeforeMove.size
+        )
+        let bestHumanProb = preEval.humanProbability(
+            forGTP: bestMoveGTP,
+            boardSize: mistake.boardBeforeMove.size
+        )
+
+        let meta = CoachingMeta(
+            playedMove: mistake.playedMoveGTP,
+            bestMove: bestMoveGTP,
+            secondMove: secondInfo?.move,
+            scoreLoss: mistake.scoreLoss,
+            winrateDropPercent: mistake.winrateDropPercent,
+            scoreLeadAfter: postEval.rootInfo.scoreLead,
+            phase: mistake.boardAfterMove.gamePhase,
+            tacticalTags: tags,
+            ownershipShifts: ownershipShifts,
+            pvOutcomes: pvOutcomes,
+            bestPV: effectiveBestPV,
+            punishPV: punishPV,
+            playedHumanProb: playedHumanProb,
+            bestHumanProb: bestHumanProb,
+            playerRank: ratingManager.currentRank.label,
+            severity: mistake.severityLabel
+        )
+
+        self.currentDigest = digest
+        self.currentMeta = meta
+        await streamCoachRequest(type: "advice", digest: digest, question: nil, meta: meta, resetSession: true)
+
+        if let lastCoach = chatHistory.last(where: { $0.role == "coach" && $0.moveNumber == mistake.moveNumber }),
+           let idx = reviewMistakes.firstIndex(where: { $0.id == mistake.id }) {
+            reviewMistakes[idx].explanation = lastCoach.text
+            reviewMistakes[idx].explanationSourceBadge = lastCoach.sourceBadge
+        }
     }
 }

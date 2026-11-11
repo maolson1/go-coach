@@ -167,6 +167,35 @@ public struct GobanView: View {
                 context.stroke(Path(ellipseIn: rect), with: .color(ringColor), lineWidth: 2.2)
             }
 
+            // 7b. Review Mistake Marker (highlights played mistake stone in orange and recommended best move in green)
+            if session.selectedVariation == nil,
+               let mistake = session.selectedReviewMistake,
+               bState.currentMoveNumber == mistake.moveNumber {
+                if let playedPt = BoardPoint.fromGTP(mistake.playedMoveGTP, boardSize: size) {
+                    let cx = margin + CGFloat(playedPt.col) * cell
+                    let cy = margin + CGFloat(playedPt.row) * cell
+                    let ringRect = CGRect(
+                        x: cx - stoneRadius,
+                        y: cy - stoneRadius,
+                        width: stoneRadius * 2,
+                        height: stoneRadius * 2
+                    )
+                    context.stroke(Path(ellipseIn: ringRect), with: .color(.orange), lineWidth: 2.8)
+                }
+                if let bestPt = BoardPoint.fromGTP(mistake.bestMoveGTP, boardSize: size) {
+                    let cx = margin + CGFloat(bestPt.col) * cell
+                    let cy = margin + CGFloat(bestPt.row) * cell
+                    let r = stoneRadius * 0.78
+                    let rect = CGRect(x: cx - r, y: cy - r, width: r * 2, height: r * 2)
+                    context.fill(Path(ellipseIn: rect), with: .color(Color.green.opacity(0.40)))
+                    context.stroke(Path(ellipseIn: rect), with: .color(.green), lineWidth: 2.4)
+                    let label = Text(mistake.bestMoveGTP)
+                        .font(.system(size: max(9, stoneRadius * 0.54), weight: .bold, design: .rounded))
+                        .foregroundColor(.white)
+                    context.draw(label, at: CGPoint(x: cx, y: cy))
+                }
+            }
+
             // 8. Candidate hints overlay (when Hint button is active)
             if session.showCandidateHints,
                session.selectedVariation == nil,

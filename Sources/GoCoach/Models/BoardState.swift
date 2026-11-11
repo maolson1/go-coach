@@ -87,7 +87,7 @@ public enum MoveAction: Equatable, Codable, Sendable {
     }
 }
 
-public struct RecordedMove: Identifiable, Codable, Sendable {
+public struct RecordedMove: Identifiable, Codable, Equatable, Sendable {
     public let id: UUID
     public let moveNumber: Int
     public let color: StoneColor
@@ -372,9 +372,25 @@ public struct BoardState: Codable, Sendable, Equatable {
         winrateDropPercent: Double
     ) {
         guard !moveHistory.isEmpty else { return }
-        let idx = moveHistory.count - 1
-        moveHistory[idx].blackWinrateAfter = blackWinrate
-        moveHistory[idx].blackScoreLeadAfter = blackScoreLead
+        updateMoveEvaluation(
+            atIndex: moveHistory.count - 1,
+            blackWinrateAfter: blackWinrate,
+            blackScoreLeadAfter: blackScoreLead,
+            scoreLoss: scoreLoss,
+            winrateDropPercent: winrateDropPercent
+        )
+    }
+
+    public mutating func updateMoveEvaluation(
+        atIndex idx: Int,
+        blackWinrateAfter: Double,
+        blackScoreLeadAfter: Double,
+        scoreLoss: Double,
+        winrateDropPercent: Double
+    ) {
+        guard idx >= 0 && idx < moveHistory.count else { return }
+        moveHistory[idx].blackWinrateAfter = blackWinrateAfter
+        moveHistory[idx].blackScoreLeadAfter = blackScoreLeadAfter
         moveHistory[idx].scoreLoss = scoreLoss
         moveHistory[idx].winrateDropPercent = winrateDropPercent
     }
@@ -876,10 +892,11 @@ public struct BoardState: Codable, Sendable, Equatable {
             var moverCaptured: [String] = []
             var oppCaptured: [String] = []
             var forcingAtaris: [String] = []
+            var firstMoveImmediateDesc: String? = nil
             var crossBoardSwitch: String? = nil
             let startPt = BoardPoint.fromGTP(bestPV[0], boardSize: size)
 
-            for gtp in bestPV.prefix(8) {
+            for (stepIdx, gtp) in bestPV.prefix(8).enumerated() {
                 let act = MoveAction.fromGTP(gtp, boardSize: size)
                 if let pt = BoardPoint.fromGTP(gtp, boardSize: size) {
                     if turn == mover, let sPt = startPt, sPt.manhattanDistance(to: pt) > 6, crossBoardSwitch == nil {
@@ -917,11 +934,26 @@ public struct BoardState: Codable, Sendable, Equatable {
                     if turn == mover {
                         moverCaptured.append(contentsOf: capGTPs)
                         if case .place(let pt) = act {
+                            var adjOppReduced: [String] = []
                             for nb in pt.neighbors(boardSize: size) where sim.stone(at: nb) == mover.opponent {
-                                let (_, libs) = sim.groupAndLiberties(at: nb)
+                                let (oppGrp, libs) = sim.groupAndLiberties(at: nb)
                                 if libs.count == 1 && !forcingAtaris.contains(gtp) {
                                     forcingAtaris.append(gtp)
+                                } else if stepIdx == 0, let rep = oppGrp.sorted(by: { ($0.row, $0.col) < ($1.row, $1.col) }).first {
+                                    let repGTP = rep.toGTP(boardSize: size)
+                                    let entry = "\(repGTP) (\(libs.count) libs)"
+                                    if !adjOppReduced.contains(entry) {
+                                        adjOppReduced.append(entry)
+                                    }
                                 }
+                            }
+                            if stepIdx == 0 {
+                                let (_, initLibs) = sim.groupAndLiberties(at: pt)
+                                var desc = "\(gtp) starts with \(initLibs.count) liberties when played"
+                                if !adjOppReduced.isEmpty && !forcingAtaris.contains(gtp) {
+                                    desc += " (leaves adjacent opponent stone(s) \(adjOppReduced.joined(separator: ", ")) — not in atari)"
+                                }
+                                firstMoveImmediateDesc = desc
                             }
                         }
                     } else {
@@ -931,6 +963,9 @@ public struct BoardState: Codable, Sendable, Equatable {
                 turn = turn.opponent
             }
             var parts: [String] = []
+            if let imm = firstMoveImmediateDesc {
+                parts.append(imm)
+            }
             if !forcingAtaris.isEmpty {
                 parts.append("gives forcing atari at \(forcingAtaris.joined(separator: ", "))")
             }
@@ -1000,12 +1035,19 @@ public struct BoardState: Codable, Sendable, Equatable {
             var turn = mover
             var moverCaptured: [String] = []
             var oppCaptured: [String] = []
-            for gtp in punishPV.prefix(6) {
+            var initialPlayedLibs: Int? = nil
+            for (stepIdx, gtp) in punishPV.prefix(6).enumerated() {
                 let act = MoveAction.fromGTP(gtp, boardSize: size)
                 if let rec = try? sim.play(act, color: turn) {
                     let capGTPs = rec.capturedPoints.map { $0.toGTP(boardSize: size) }
-                    if turn == mover { moverCaptured.append(contentsOf: capGTPs) }
-                    else { oppCaptured.append(contentsOf: capGTPs) }
+                    if turn == mover {
+                        moverCaptured.append(contentsOf: capGTPs)
+                        if stepIdx == 0, case .place(let pt) = act {
+                            initialPlayedLibs = sim.groupAndLiberties(at: pt).liberties.count
+                        }
+                    } else {
+                        oppCaptured.append(contentsOf: capGTPs)
+                    }
                 }
                 turn = turn.opponent
             }
@@ -1014,8 +1056,13 @@ public struct BoardState: Codable, Sendable, Equatable {
                 parts.append("opponent captures \(oppCaptured.count) of your stone(s) [\(oppCaptured.prefix(3).joined(separator: ","))]")
             }
             if let firstPt = BoardPoint.fromGTP(punishPV[0], boardSize: size), sim.stone(at: firstPt) == mover {
-                let (_, libs) = sim.groupAndLiberties(at: firstPt)
-                parts.append("your \(punishPV[0]) group ends PV with \(libs.count) liberties")
+                let (_, endLibs) = sim.groupAndLiberties(at: firstPt)
+                if let initLibs = initialPlayedLibs {
+                    let oppReply = punishPV.dropFirst().first ?? "reply"
+                    parts.append("your \(punishPV[0]) group starts with \(initLibs) liberties when played, and has \(endLibs.count) liberties at end of PV (after opponent's \(oppReply))")
+                } else {
+                    parts.append("your \(punishPV[0]) group has \(endLibs.count) liberties at end of PV")
+                }
             }
             if !parts.isEmpty {
                 summaries.append("Punishment PV outcome: " + parts.joined(separator: "; "))
@@ -1230,8 +1277,13 @@ public struct BoardState: Codable, Sendable, Equatable {
             let matchStr = String(sgf[kmRange])
             if let open = matchStr.firstIndex(of: "["), let close = matchStr.firstIndex(of: "]") {
                 let valStr = String(matchStr[matchStr.index(after: open)..<close])
-                if let parsed = Double(valStr) {
-                    komi = parsed
+                if var parsed = Double(valStr) {
+                    if parsed == 375.0 || abs(parsed - 3.75) < 0.01 {
+                        parsed = 7.5
+                    } else if abs(parsed) > 150.0 {
+                        parsed = parsed / 100.0
+                    }
+                    komi = min(150.0, max(-150.0, (parsed * 2.0).rounded() / 2.0))
                 }
             }
         }

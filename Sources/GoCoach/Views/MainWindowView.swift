@@ -3,6 +3,7 @@ import SwiftUI
 public struct MainWindowView: View {
     @ObservedObject var session: GameSession
     @State private var showingNewGameSheet: Bool = false
+    @State private var showingLoadSheet: Bool = false
 
     public init(session: GameSession) {
         self.session = session
@@ -49,6 +50,9 @@ public struct MainWindowView: View {
         }
         .sheet(isPresented: $showingNewGameSheet) {
             NewGameSheet(session: session)
+        }
+        .sheet(isPresented: $showingLoadSheet) {
+            LoadSGFSheet(session: session)
         }
     }
 
@@ -171,33 +175,90 @@ public struct MainWindowView: View {
             Button {
                 showingNewGameSheet = true
             } label: {
-                Label("New Game", systemImage: "plus.circle.fill")
+                Label("New", systemImage: "plus.circle.fill")
             }
             .buttonStyle(.borderedProminent)
 
             Button {
-                session.passHumanTurn()
+                showingLoadSheet = true
             } label: {
-                Label("Pass", systemImage: "forward.frame")
+                Label("Load", systemImage: "folder.badge.plus")
             }
             .buttonStyle(.bordered)
-            .disabled(session.isEngineThinking || session.activeIntervention != nil || session.gameResultSummary != nil)
 
-            Button {
-                session.undoLastExchange()
-            } label: {
-                Label("Undo", systemImage: "arrow.uturn.backward")
-            }
-            .buttonStyle(.bordered)
-            .disabled(session.board.moveHistory.isEmpty || session.isEngineThinking)
+            if session.isReviewMode {
+                Divider().frame(height: 18)
 
-            Button {
-                session.resignGame()
-            } label: {
-                Label("Resign", systemImage: "flag")
+                Button {
+                    session.stepReviewMove(to: 0)
+                } label: {
+                    Image(systemName: "backward.end.fill")
+                }
+                .buttonStyle(.borderless)
+                .disabled(session.currentReviewMoveIndex <= 0)
+
+                Button {
+                    session.stepReviewMove(to: session.currentReviewMoveIndex - 1)
+                } label: {
+                    Image(systemName: "chevron.left")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(session.currentReviewMoveIndex <= 0)
+
+                Text("Move \(session.currentReviewMoveIndex) / \(session.reviewScanTotal)")
+                    .font(.system(size: 12, weight: .medium, design: .monospaced))
+                    .frame(minWidth: 84)
+
+                Button {
+                    session.stepReviewMove(to: session.currentReviewMoveIndex + 1)
+                } label: {
+                    Image(systemName: "chevron.right")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(session.currentReviewMoveIndex >= session.reviewScanTotal)
+
+                Button {
+                    session.stepReviewMove(to: session.reviewScanTotal)
+                } label: {
+                    Image(systemName: "forward.end.fill")
+                }
+                .buttonStyle(.borderless)
+                .disabled(session.currentReviewMoveIndex >= session.reviewScanTotal)
+
+                Button {
+                    session.resumePlayingFromReviewPosition()
+                } label: {
+                    Label("Play from Here", systemImage: "play.fill")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            } else {
+                Button {
+                    session.passHumanTurn()
+                } label: {
+                    Label("Pass", systemImage: "forward.frame")
+                }
+                .buttonStyle(.bordered)
+                .disabled(session.isEngineThinking || session.activeIntervention != nil || session.gameResultSummary != nil)
+
+                Button {
+                    session.undoLastExchange()
+                } label: {
+                    Label("Undo", systemImage: "arrow.uturn.backward")
+                }
+                .buttonStyle(.bordered)
+                .disabled(session.board.moveHistory.isEmpty || session.isEngineThinking)
+
+                Button {
+                    session.resignGame()
+                } label: {
+                    Label("Resign", systemImage: "flag")
+                }
+                .buttonStyle(.bordered)
+                .disabled(session.board.moveHistory.isEmpty || session.gameResultSummary != nil)
             }
-            .buttonStyle(.bordered)
-            .disabled(session.board.moveHistory.isEmpty || session.gameResultSummary != nil)
 
             Spacer()
 

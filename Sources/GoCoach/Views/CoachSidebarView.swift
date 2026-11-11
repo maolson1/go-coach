@@ -13,6 +13,11 @@ public struct CoachSidebarView: View {
             evaluationHeader
             Divider()
 
+            if session.isReviewMode {
+                reviewMistakesSection
+                Divider()
+            }
+
             if let intervention = session.activeIntervention {
                 interventionCard(intervention)
                 Divider()
@@ -134,7 +139,99 @@ public struct CoachSidebarView: View {
         }
     }
 
-    // MARK: - 2. Immediate Pause-on-Blunder Intervention Card
+    // MARK: - 2. Game Review Mistakes List
+    private var reviewMistakesSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Image(systemName: "exclamationmark.bubble.fill")
+                    .foregroundStyle(.orange)
+                Text("Game Review — Major Mistakes (\(session.reviewMistakes.count))")
+                    .font(.system(size: 12, weight: .bold))
+                Spacer()
+                if session.isScanningReview {
+                    HStack(spacing: 6) {
+                        ProgressView()
+                            .controlSize(.small)
+                        Text("\(session.reviewScanProgress)/\(session.reviewScanTotal)")
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                        Button("Stop") {
+                            session.stopReviewScan()
+                        }
+                        .font(.system(size: 10))
+                        .buttonStyle(.bordered)
+                        .controlSize(.mini)
+                    }
+                }
+            }
+
+            if session.reviewMistakes.isEmpty {
+                Text(session.isScanningReview
+                     ? "KataGo is scanning the game for major mistakes..."
+                     : "No major mistakes found above the \(String(format: "%.1f", session.blunderScoreThreshold))-point threshold.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .padding(.vertical, 4)
+            } else {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 6) {
+                        ForEach(session.reviewMistakes) { mistake in
+                            let isSelected = (session.selectedReviewMistakeID == mistake.id)
+                            Button {
+                                session.selectReviewedMistake(mistake)
+                            } label: {
+                                HStack(spacing: 8) {
+                                    Circle()
+                                        .fill(mistake.color == .black ? Color.black : Color.white)
+                                        .frame(width: 10, height: 10)
+                                        .overlay(Circle().stroke(Color.gray.opacity(0.6), lineWidth: 1))
+
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        HStack(spacing: 6) {
+                                            Text("Move #\(mistake.moveNumber): \(mistake.playedMoveGTP)")
+                                                .font(.system(size: 12, weight: .bold, design: .monospaced))
+                                            Text("→ Best: \(mistake.bestMoveGTP)")
+                                                .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                                                .foregroundStyle(.green)
+                                        }
+                                        if let exp = mistake.explanation, !exp.isEmpty {
+                                            Text(exp)
+                                                .font(.system(size: 10))
+                                                .foregroundStyle(.secondary)
+                                                .lineLimit(1)
+                                        }
+                                    }
+
+                                    Spacer()
+
+                                    Text(String(format: "-%.1f pts (-%.0f%%)", mistake.scoreLoss, mistake.winrateDropPercent))
+                                        .font(.system(size: 10, weight: .bold, design: .monospaced))
+                                        .foregroundStyle(.orange)
+                                        .padding(.horizontal, 6)
+                                        .padding(.vertical, 2)
+                                        .background(Color.orange.opacity(0.14), in: Capsule())
+                                }
+                                .padding(7)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 7)
+                                        .fill(isSelected ? Color.accentColor.opacity(0.18) : Color.secondary.opacity(0.08))
+                                )
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 7)
+                                        .stroke(isSelected ? Color.accentColor : Color.clear, lineWidth: 1.2)
+                                )
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                }
+                .frame(maxHeight: 165)
+            }
+        }
+        .padding(12)
+    }
+
+    // MARK: - 3. Immediate Pause-on-Blunder Intervention Card
     @ViewBuilder
     private func interventionCard(_ intervention: BlunderIntervention) -> some View {
         VStack(alignment: .leading, spacing: 10) {

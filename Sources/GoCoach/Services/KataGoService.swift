@@ -175,6 +175,24 @@ public actor KataGoService {
     private func handleOutputLine(_ data: Data) {
         let decoder = JSONDecoder()
         guard var resp = try? decoder.decode(KataGoAnalysisResponse.self, from: data) else {
+            if let rawObj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let errStr = rawObj["error"] as? String {
+                let err = NSError(
+                    domain: "KataGoService",
+                    code: 3,
+                    userInfo: [NSLocalizedDescriptionKey: "KataGo query error: \(errStr)"]
+                )
+                if let id = rawObj["id"] as? String,
+                   let cont = pendingContinuations.removeValue(forKey: id) {
+                    cont.resume(throwing: err)
+                } else {
+                    let all = pendingContinuations
+                    pendingContinuations.removeAll()
+                    for (_, cont) in all {
+                        cont.resume(throwing: err)
+                    }
+                }
+            }
             return
         }
         if resp.isDuringSearch == true {
@@ -216,10 +234,11 @@ public actor KataGoService {
             [rec.color.rawValue, rec.action.toGTP(boardSize: board.size)]
         }
 
+        let safeKomi = min(150.0, max(-150.0, (board.komi * 2.0).rounded() / 2.0))
         var query: [String: Any] = [
             "id": reqId,
             "rules": "japanese",
-            "komi": board.komi,
+            "komi": safeKomi,
             "boardXSize": board.size,
             "boardYSize": board.size,
             "moves": movesPayload,
